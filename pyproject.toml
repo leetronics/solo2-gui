@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "solokeys-gui"
+version = "0.1.0"
+description = "Platform-independent GUI for managing SoloKeys Solo 2 FIDO2 tokens"
+authors = ["SoloKeys GUI Team"]
+readme = "README.md"
+packages = [{include = "solo_gui"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pyside6 = "^6.6.0"
+fido2 = "^1.1.2"
+pyusb = "^1.2.1"
+requests = "^2.31.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.3"
+pytest-qt = "^4.2.0"
+black = "^23.11.0"
+mypy = "^1.7.1"
+pyinstaller = "^6.2.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

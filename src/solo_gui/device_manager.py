@@ -1,0 +1,609 @@
+"""Singleton device manager for centralized, thread-safe device access."""
+
+import os
+import struct
+import threading
+import time
+from typing import Optional, Callable, Any, Dict, List
+from dataclasses import dataclass
+from enum import Enum, auto
+from queue import Queue, Empty
+
+from PySide6.QtCore import QObject, Signal, Slot, QThread
+
+from fido2.hid import CtapHidDevice, CTAPHID
+from fido2.ctap2 import Ctap2
+from fido2.ctap2.pin import ClientPin
+from fido2.ctap2.credman import CredentialManagement
+
+
+class RequestType(Enum):
+    """Types of device requests."""
+    GET_INFO = auto()
+    GET_PIN_RETRIES = auto()
+    WINK = auto()
+    VENDOR_COMMAND = auto()
+    RESET = auto()
+    GET_CREDENTIALS = auto()
+    DELETE_CREDENTIAL = auto()
+    RENAME_CREDENTIAL = auto()
+    SET_PIN = auto()
+    CHANGE_PIN = auto()
+
+
+@dataclass
+class DeviceRequest:
+    """A request to execute on the device."""
+    request_type: RequestType
+    callback: Optional[Callable[[Any, Optional[str]], None]]
+    args: Dict[str, Any]
+    operation_id: str = ""
+
+
+class DeviceManager(QObject):
+    """Singleton device manager for thread-safe device access."""
+    
+    _instance: Optional['DeviceManager'] = None
+    _lock = threading.Lock()
+    
+    # Public signals for UI updates
+    device_connected = Signal(str)
+    device_disconnected = Signal()
+    operation_started = Signal(str, str)
+    operation_progress = Signal(str, int, str)
+    operation_completed = Signal(str, bool, str)
+    error_occurred = Signal(str, str)
+    credentials_loaded = Signal(str, list)
+    pin_status_updated = Signal(str, dict)
+    pin_required = Signal(str)
+    
+    @classmethod
+    def get_instance(cls) -> 'DeviceManager':
+        """Get the singleton instance."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = DeviceManager()
+        return cls._instance
+    
+    def __init__(self):
+        super().__init__()
+        self._device_path: Optional[str] = None
+        self._ctap2: Optional[Ctap2] = None
+        self._client_pin: Optional[ClientPin] = None
+        self._pin_token: Optional[bytes] = None
+        self._pin_protocol = None
+        self._credman: Optional[CredentialManagement] = None
+        self._cached_pin: Optional[str] = None
+        self._request_queue: Queue = Queue()
+        self._worker_thread: Optional[QThread] = None
+        self._running = False
+        self._mutex = threading.Lock()
+    
+    def start(self, device_path: str) -> bool:
+        """Start the device manager with the given device path."""
+        with self._lock:
+            if self._running:
+                return True
+            
+            self._device_path = device_path
+            
+            if not self._open_device():
+                return False
+            
+            self._running = True
+            self._worker_thread = QThread()
+            self.moveToThread(self._worker_thread)
+            self._worker_thread.started.connect(self._process_loop)
+            self._worker_thread.start()
+            
+            self.device_connected.emit(device_path)
+            return True
+    
+    def stop(self):
+        """Stop the device manager."""
+        with self._lock:
+            if not self._running:
+                return
+            
+            self._running = False
+            self._cached_pin = None
+            self._request_queue.put(None)
+            
+            if self._worker_thread:
+                self._worker_thread.quit()
+                self._worker_thread.wait()
+                self._worker_thread = None
+            
+            self._close_device()
+            self.device_disconnected.emit()
+    
+    def _open_device(self) -> bool:
+        """Open the device connection."""
+        try:
+            for hid_dev in CtapHidDevice.list_devices():
+                if hid_dev.descriptor.path == self._device_path:
+                    self._ctap2 = Ctap2(hid_dev)
+                    return True
+            return False
+        except Exception as e:
+            # CTAP error 0x00 is actually success, device is already open
+            if "0x00" in str(e) or "SUCCESS" in str(e):
+                return True
+            print(f"[DeviceManager] Failed to open: {e}")
+            return False
+    
+    def _close_device(self):
+        """Close the device connection."""
+        self._ctap2 = None
+        self._client_pin = None
+        self._pin_token = None
+        self._credman = None
+    
+    def _reopen_device(self) -> bool:
+        """Reopen device connection (after error)."""
+        self._close_device()
+        time.sleep(0.1)  # Brief delay to let USB settle
+        if not self._open_device():
+            return False
+        
+        # Reset CTAPHID channel
+        try:
+            if self._ctap2:
+                hid_dev = self._ctap2.device
+                hid_dev._channel_id = 0xFFFFFFFF  # Broadcast channel
+                nonce = os.urandom(8)
+                response = hid_dev.call(CTAPHID.INIT, nonce)
+                if response[:8] == nonce:
+                    (hid_dev._channel_id,) = struct.unpack_from(">I", response, 8)
+        except Exception:
+            pass  # Ignore errors during channel reset
+        
+        return True
+    
+    def _wait_for_device(self, timeout: float = 10.0) -> bool:
+        """Wait for device to reappear after disconnect."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                for hid_dev in CtapHidDevice.list_devices():
+                    if hid_dev.descriptor.path == self._device_path:
+                        self._ctap2 = Ctap2(hid_dev)
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        return False
+    
+    @Slot()
+    def _process_loop(self):
+        """Main processing loop - runs in worker thread."""
+        while self._running:
+            try:
+                request = self._request_queue.get(timeout=0.1)
+                if request is None:
+                    break
+                self._handle_request(request)
+            except Empty:
+                continue
+            except Exception as e:
+                print(f"[DeviceManager] Error in process loop: {e}")
+    
+    def _handle_request(self, request: DeviceRequest):
+        """Handle a single request."""
+        try:
+            self.operation_started.emit(request.operation_id, request.request_type.name)
+            
+            if request.request_type == RequestType.GET_INFO:
+                self._do_get_info(request)
+            elif request.request_type == RequestType.GET_PIN_RETRIES:
+                self._do_get_pin_retries(request)
+            elif request.request_type == RequestType.WINK:
+                self._do_wink(request)
+            elif request.request_type == RequestType.VENDOR_COMMAND:
+                self._do_vendor_command(request)
+            elif request.request_type == RequestType.RESET:
+                self._do_reset(request)
+            elif request.request_type == RequestType.GET_CREDENTIALS:
+                self._do_get_credentials(request)
+            elif request.request_type == RequestType.DELETE_CREDENTIAL:
+                self._do_delete_credential(request)
+            elif request.request_type == RequestType.RENAME_CREDENTIAL:
+                self._do_rename_credential(request)
+            elif request.request_type == RequestType.SET_PIN:
+                self._do_set_pin(request)
+            elif request.request_type == RequestType.CHANGE_PIN:
+                self._do_change_pin(request)
+        except Exception as e:
+            if request.callback:
+                request.callback(None, str(e))
+            self.error_occurred.emit(request.operation_id, str(e))
+    
+    def _ensure_device(self) -> bool:
+        """Ensure device is connected, reopen if needed."""
+        if self._ctap2 is None:
+            return self._reopen_device()
+        return True
+    
+    def _ensure_authenticated(self, pin: str) -> bool:
+        """Ensure we have valid PIN token for CredMan operations."""
+        if self._ctap2 is None:
+            if not self._reopen_device():
+                return False
+        
+        try:
+            if self._client_pin is None:
+                self._client_pin = ClientPin(self._ctap2)
+            
+            self._pin_protocol = self._client_pin.protocol
+            self._pin_token = self._client_pin.get_pin_token(
+                pin, ClientPin.PERMISSION.CREDENTIAL_MGMT
+            )
+            self._cached_pin = pin
+            
+            self._credman = CredentialManagement(
+                self._ctap2, self._pin_protocol, self._pin_token
+            )
+            return True
+        except Exception:
+            return False
+    
+    def _do_get_info(self, request: DeviceRequest):
+        """Execute GET_INFO request."""
+        if not self._ensure_device():
+            request.callback(None, "Device not connected")
+            return
+        
+        try:
+            info = self._ctap2.get_info()
+            result = {
+                'aaguid': info.aaguid,
+                'versions': info.versions,
+                'options': dict(info.options) if info.options else {},
+            }
+            request.callback(result, None)
+        except Exception as e:
+            error_msg = str(e)
+            if "wrong channel" in error_msg.lower():
+                if self._reopen_device():
+                    try:
+                        info = self._ctap2.get_info()
+                        result = {
+                            'aaguid': info.aaguid,
+                            'versions': info.versions,
+                            'options': dict(info.options) if info.options else {},
+                        }
+                        request.callback(result, None)
+                        return
+                    except Exception as e2:
+                        request.callback(None, str(e2))
+                        return
+            request.callback(None, error_msg)
+    
+    def _do_get_pin_retries(self, request: DeviceRequest):
+        """Execute GET_PIN_RETRIES request."""
+        if not self._ensure_device():
+            request.callback(None, "Device not connected")
+            return
+        
+        try:
+            if self._client_pin is None:
+                self._client_pin = ClientPin(self._ctap2)
+            retries = self._client_pin.get_pin_retries()[0]
+            request.callback(retries, None)
+        except Exception as e:
+            error_msg = str(e)
+            if "wrong channel" in error_msg.lower():
+                if self._reopen_device():
+                    try:
+                        if self._client_pin is None:
+                            self._client_pin = ClientPin(self._ctap2)
+                        retries = self._client_pin.get_pin_retries()[0]
+                        request.callback(retries, None)
+                        return
+                    except Exception as e2:
+                        request.callback(None, str(e2))
+                        return
+            request.callback(None, error_msg)
+    
+    def _do_wink(self, request: DeviceRequest):
+        """Execute WINK request."""
+        if not self._ensure_device():
+            request.callback(None, "Device not connected")
+            return
+        
+        try:
+            self._ctap2.device.wink()
+            request.callback(True, None)
+        except Exception as e:
+            error_msg = str(e)
+            if "wrong_channel" in error_msg.lower():
+                if self._reopen_device():
+                    try:
+                        self._ctap2.device.wink()
+                        request.callback(True, None)
+                        return
+                    except Exception as e2:
+                        request.callback(None, str(e2))
+                        return
+            request.callback(None, error_msg)
+    
+    def _do_vendor_command(self, request: DeviceRequest):
+        """Execute vendor command."""
+        if not self._ensure_device():
+            request.callback(None, "Device not connected")
+            return
+        
+        try:
+            command = request.args['command']
+            data = request.args['data']
+            response = self._ctap2.device.call(command, data)
+            request.callback(response, None)
+        except Exception as e:
+            request.callback(None, str(e))
+    
+    def _do_reset(self, request: DeviceRequest):
+        """Execute RESET request."""
+        if not self._ensure_device():
+            request.callback(None, "Device not connected")
+            return
+        
+        try:
+            self._ctap2.reset()
+            self._cached_pin = None
+            self._pin_token = None
+            self._credman = None
+            request.callback(True, None)
+        except Exception as e:
+            request.callback(None, str(e))
+    
+    def _do_get_credentials(self, request: DeviceRequest):
+        """Execute GET_CREDENTIALS request."""
+        pin = request.args.get('pin') or self._cached_pin
+        if not pin:
+            self.pin_required.emit(request.operation_id)
+            request.callback(None, "PIN required")
+            return
+        
+        if not self._ensure_authenticated(pin):
+            request.callback(None, "Authentication failed")
+            return
+        
+        try:
+            credentials = []
+            metadata = self._credman.get_metadata()
+            existing_count = metadata.get(CredentialManagement.RESULT.EXISTING_CRED_COUNT, 0)
+            
+            if existing_count > 0:
+                self.operation_progress.emit(request.operation_id, 10, f"Found {existing_count} credentials")
+                rps = self._credman.enumerate_rps()
+                
+                for idx, rp_data in enumerate(rps):
+                    rp = rp_data.get(CredentialManagement.RESULT.RP)
+                    rp_id_hash = rp_data.get(CredentialManagement.RESULT.RP_ID_HASH)
+                    
+                    if not rp:
+                        continue
+                    
+                    creds = self._credman.enumerate_creds(rp_id_hash)
+                    for cred_data in creds:
+                        cred_id = cred_data.get(CredentialManagement.RESULT.CREDENTIAL_ID)
+                        user = cred_data.get(CredentialManagement.RESULT.USER)
+                        
+                        if cred_id and user:
+                            credentials.append({
+                                'cred_id': cred_id,
+                                'rp_id': rp.get('id', ''),
+                                'rp_name': rp.get('name', ''),
+                                'user_id': user.get('id', b'').hex() if isinstance(user.get('id'), bytes) else str(user.get('id', '')),
+                                'user_name': user.get('name', ''),
+                                'user_display_name': user.get('displayName', ''),
+                            })
+                    
+                    progress = int(10 + (idx + 1) / len(rps) * 80)
+                    self.operation_progress.emit(request.operation_id, progress, f"Loading credentials from {rp.get('name', 'Unknown')}...")
+            
+            self.credentials_loaded.emit(request.operation_id, credentials)
+            request.callback(credentials, None)
+        except Exception as e:
+            request.callback(None, str(e))
+    
+    def _do_delete_credential(self, request: DeviceRequest):
+        """Execute DELETE_CREDENTIAL request."""
+        pin = request.args.get('pin') or self._cached_pin
+        cred_id = request.args.get('cred_id')
+        
+        if not pin:
+            self.pin_required.emit(request.operation_id)
+            request.callback(None, "PIN required")
+            return
+        
+        if not self._ensure_authenticated(pin):
+            request.callback(None, "Authentication failed")
+            return
+        
+        try:
+            self._credman.delete_cred(cred_id)
+            request.callback(True, None)
+        except Exception as e:
+            request.callback(False, str(e))
+    
+    def _do_rename_credential(self, request: DeviceRequest):
+        """Execute RENAME_CREDENTIAL request."""
+        pin = request.args.get('pin') or self._cached_pin
+        cred_id = request.args.get('cred_id')
+        new_name = request.args.get('new_name')
+        
+        if not pin:
+            self.pin_required.emit(request.operation_id)
+            request.callback(None, "PIN required")
+            return
+        
+        if not self._ensure_authenticated(pin):
+            request.callback(None, "Authentication failed")
+            return
+        
+        try:
+            cred_id_descriptor = {"id": cred_id, "type": "public-key"}
+            user_info = {
+                "id": request.args.get('user_id', b''),
+                "name": new_name,
+                "displayName": new_name,
+            }
+            self._credman.update_user_info(cred_id_descriptor, user_info)
+            request.callback(True, None)
+        except Exception as e:
+            request.callback(False, str(e))
+    
+    def _do_set_pin(self, request: DeviceRequest):
+        """Execute SET_PIN request."""
+        new_pin = request.args.get('new_pin')
+        
+        if not self._ensure_device():
+            request.callback(None, "Device not connected")
+            return
+        
+        try:
+            if self._client_pin is None:
+                self._client_pin = ClientPin(self._ctap2)
+            self._client_pin.set_pin(new_pin)
+            self._cached_pin = new_pin
+            request.callback(True, None)
+        except Exception as e:
+            request.callback(False, str(e))
+    
+    def _do_change_pin(self, request: DeviceRequest):
+        """Execute CHANGE_PIN request."""
+        current_pin = request.args.get('current_pin')
+        new_pin = request.args.get('new_pin')
+        
+        if not self._ensure_device():
+            request.callback(None, "Device not connected")
+            return
+        
+        try:
+            if self._client_pin is None:
+                self._client_pin = ClientPin(self._ctap2)
+            self._client_pin.change_pin(current_pin, new_pin)
+            self._cached_pin = new_pin
+            self._pin_token = None
+            self._credman = None
+            request.callback(True, None)
+        except Exception as e:
+            request.callback(False, str(e))
+    
+    # Public API Methods
+    
+    def submit_request(self, request: DeviceRequest):
+        """Submit a request to the queue."""
+        self._request_queue.put(request)
+    
+    def get_info(self, callback: Callable[[Dict, Optional[str]], None], operation_id: str = ""):
+        """Queue a get_info request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.GET_INFO,
+            callback=callback,
+            args={},
+            operation_id=operation_id
+        ))
+    
+    def get_pin_retries(self, callback: Callable[[int, Optional[str]], None], operation_id: str = ""):
+        """Queue a get_pin_retries request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.GET_PIN_RETRIES,
+            callback=callback,
+            args={},
+            operation_id=operation_id
+        ))
+    
+    def wink(self, callback: Callable[[bool, Optional[str]], None], operation_id: str = ""):
+        """Queue a wink request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.WINK,
+            callback=callback,
+            args={},
+            operation_id=operation_id
+        ))
+    
+    def vendor_command(self, command: int, data: bytes,
+                      callback: Callable[[bytes, Optional[str]], None], operation_id: str = ""):
+        """Queue a vendor command request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.VENDOR_COMMAND,
+            callback=callback,
+            args={'command': command, 'data': data},
+            operation_id=operation_id
+        ))
+    
+    def reset(self, callback: Callable[[bool, Optional[str]], None], operation_id: str = ""):
+        """Queue a reset request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.RESET,
+            callback=callback,
+            args={},
+            operation_id=operation_id
+        ))
+    
+    def get_credentials(self, pin: Optional[str] = None,
+                       callback: Callable[[List, Optional[str]], None] = None,
+                       operation_id: str = ""):
+        """Queue a get_credentials request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.GET_CREDENTIALS,
+            callback=callback,
+            args={'pin': pin},
+            operation_id=operation_id
+        ))
+    
+    def delete_credential(self, cred_id: bytes, pin: Optional[str] = None,
+                         callback: Callable[[bool, Optional[str]], None] = None,
+                         operation_id: str = ""):
+        """Queue a delete_credential request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.DELETE_CREDENTIAL,
+            callback=callback,
+            args={'cred_id': cred_id, 'pin': pin},
+            operation_id=operation_id
+        ))
+    
+    def rename_credential(self, cred_id: bytes, new_name: str, user_id: bytes,
+                         pin: Optional[str] = None,
+                         callback: Callable[[bool, Optional[str]], None] = None,
+                         operation_id: str = ""):
+        """Queue a rename_credential request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.RENAME_CREDENTIAL,
+            callback=callback,
+            args={'cred_id': cred_id, 'new_name': new_name, 'user_id': user_id, 'pin': pin},
+            operation_id=operation_id
+        ))
+    
+    def set_pin(self, new_pin: str,
+               callback: Callable[[bool, Optional[str]], None] = None,
+               operation_id: str = ""):
+        """Queue a set_pin request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.SET_PIN,
+            callback=callback,
+            args={'new_pin': new_pin},
+            operation_id=operation_id
+        ))
+    
+    def change_pin(self, current_pin: str, new_pin: str,
+                  callback: Callable[[bool, Optional[str]], None] = None,
+                  operation_id: str = ""):
+        """Queue a change_pin request."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.CHANGE_PIN,
+            callback=callback,
+            args={'current_pin': current_pin, 'new_pin': new_pin},
+            operation_id=operation_id
+        ))
+    
+    def set_cached_pin(self, pin: str):
+        """Cache PIN for the session (memory only, cleared on disconnect)."""
+        self._cached_pin = pin
+    
+    def clear_cached_pin(self):
+        """Clear cached PIN."""
+        self._cached_pin = None

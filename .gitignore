@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.app
+*.dmg
+*.exe
+*.zip
+dist/
+build/
+
+# PyInstaller
+*.spec.bak
+
+# Temporary files
+*.log
+*.tmp
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Project specific
+.claude/
+cc-reaper/
+*.bak
+pfr-settings.yam
+pfr-settings.yaml
+solo2-gui.code-workspace
+
+# Debug files
+src/solo_gui/debug.txt
