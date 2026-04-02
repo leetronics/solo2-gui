@@ -5,7 +5,10 @@ description = "Platform-independent GUI for managing SoloKeys Solo 2 FIDO2 token
 authors = ["SoloKeys GUI Team"]
 license = "GPL-3.0-only"
 readme = "README.md"
-packages = [{include = "solo_gui", from = "src"}]
+packages = [
+    {include = "solo_gui", from = "src"},
+    {include = "solo2", from = "src"},
+]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -14,6 +17,7 @@ fido2 = "^1.1.2"
 pyusb = "^1.2.1"
 requests = "^2.31.0"
 qtawesome = "^1.3.0"
+pyscard = "^2.0.9"
 pywin32 = {version = ">=306", markers = "sys_platform == 'win32'"}
 hidapi = {version = ">=0.14.0.post2", markers = "sys_platform == 'win32'"}
 

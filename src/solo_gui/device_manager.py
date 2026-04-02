@@ -127,6 +127,10 @@ class DeviceManager(QObject):
         try:
             if self._device is None:
                 return False
+            if hasattr(self._device, "prefers_ccid") and self._device.prefers_ccid():
+                _log.debug("_open_device: CCID-backed device=%r", getattr(self._device, "path", None))
+                self._ctap2 = None
+                return True
             _log.debug("_open_device: looking for device=%r", getattr(self._device, "path", None))
             self._ctap2 = self._device.open_ctap2()
             if self._ctap2 is not None:
@@ -231,6 +235,8 @@ class DeviceManager(QObject):
     
     def _ensure_device(self) -> bool:
         """Ensure device is connected, reopen if needed."""
+        if self._device is not None and hasattr(self._device, "prefers_ccid") and self._device.prefers_ccid():
+            return True
         if self._ctap2 is None:
             return self._reopen_device()
         return True
@@ -266,6 +272,16 @@ class DeviceManager(QObject):
             return
 
         try:
+            if self._ctap2 is None and self._device is not None and hasattr(self._device, "prefers_ccid") and self._device.prefers_ccid():
+                info = self._device.get_info()
+                result = {
+                    'aaguid': None,
+                    'versions': [],
+                    'options': {},
+                    'firmware_version': info.firmware_version,
+                }
+                request.callback(result, None)
+                return
             _log.debug("_do_get_info: calling ctap2.get_info()")
             info = self._ctap2.get_info()
             opts = dict(info.options) if info.options else {}
@@ -327,6 +343,10 @@ class DeviceManager(QObject):
             return
         
         try:
+            if self._ctap2 is None and self._device is not None:
+                self._device.admin().wink()
+                request.callback(True, None)
+                return
             self._ctap2.device.wink()
             request.callback(True, None)
         except Exception as e:
@@ -351,6 +371,10 @@ class DeviceManager(QObject):
         try:
             command = request.args['command']
             data = request.args['data']
+            if self._ctap2 is None and self._device is not None:
+                response = self._device.admin().call(command, data)
+                request.callback(response, None)
+                return
             response = self._ctap2.device.call(command, data)
             request.callback(response, None)
         except Exception as e:
@@ -498,6 +522,10 @@ class DeviceManager(QObject):
 
         try:
             apdu_bytes = request.args['apdu_bytes']
+            if self._ctap2 is None and self._device is not None:
+                response = self._device.secrets().send_apdu(bytes(apdu_bytes))
+                request.callback(response, None)
+                return
             response = self._ctap2.device.call(0x70, bytes(apdu_bytes))
             request.callback(response, None)
         except Exception as e:

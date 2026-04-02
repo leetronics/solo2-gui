@@ -21,9 +21,21 @@ a = Analysis(
     hiddenimports=[
         'hid',
         # Our own modules (lazy-imported inside _handle_direct)
+        'solo2',
+        'solo2.clients',
+        'solo2.device',
+        'solo2.discovery',
+        'solo2.errors',
+        'solo2.hid_backend',
+        'solo2.pcsc',
+        'solo2.transport',
         'solo_gui.device_transport',
         'solo_gui.hid_backend',
         'solo_gui.oath_bridge',
+        'smartcard',
+        'smartcard.System',
+        'smartcard.Exceptions',
+        'smartcard.CardConnection',
         # fido2 core
         'fido2',
         'fido2.cbor',

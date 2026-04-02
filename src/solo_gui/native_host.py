@@ -105,7 +105,7 @@ def _recv_exactly(s, n: int) -> bytes:
 def _handle_direct(msg: dict) -> dict:
     """Handle the message directly via fido2 HID, without solokeys-gui."""
     try:
-        from solo_gui.device_transport import call_device_apdu
+        from solo2.transport import call_device_apdu
         from solo_gui.oath_bridge import OATHBridge, OATHTouchRequired, OATHPINRequired
     except ImportError as e:
         return {"success": False, "error": f"Direct HID not available: {e}"}

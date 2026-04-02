@@ -3,12 +3,11 @@
 import logging
 from typing import Dict, List, Optional
 
-import usb.core
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from ..hid_backend import list_ctap_hid_devices
-from .device import DeviceMode, Solo2Device, SoloDevice
 from ..utils.usb_monitor import USBMonitor
+from solo2 import DeviceMode, Solo2Device, SoloDevice
+from solo2.discovery import DeviceWatcher, list_bootloader_descriptors, list_regular_descriptors
 
 _log = logging.getLogger("solo2device")
 
@@ -24,6 +23,7 @@ class DeviceMonitor(QObject):
         super().__init__()
         self._devices: Dict[str, SoloDevice] = {}
         self._usb_monitor: Optional[USBMonitor] = None
+        self._watcher = DeviceWatcher()
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._scan_devices)
@@ -57,22 +57,15 @@ class DeviceMonitor(QObject):
     def _on_usb_device_connected(self, device_id: str, bus: int, address: int) -> None:
         """Handle USB device connection."""
         try:
-            dev = usb.core.find(bus=bus, address=address)
-            if not dev:
-                return
-
-            if dev.idProduct == Solo2Device.REGULAR_PID:
-                return
-            elif dev.idProduct == Solo2Device.BOOTLOADER_PID:
-                mode = DeviceMode.BOOTLOADER
-            else:
-                return
-
             if device_id not in self._devices:
-                device = Solo2Device(device_id, mode)
-                if device.connect():
-                    self._devices[device_id] = device
-                    self.device_connected.emit(device)
+                for descriptor in list_bootloader_descriptors():
+                    if descriptor.id != device_id:
+                        continue
+                    device = Solo2Device.from_descriptor(descriptor)
+                    if device.connect():
+                        self._devices[device.path] = device
+                        self.device_connected.emit(device)
+                    break
         except Exception:
             pass
 
@@ -84,23 +77,6 @@ class DeviceMonitor(QObject):
         if not device:
             return
 
-        # Check if there's still a USB device of the same mode connected
-        # (handles USB re-enumeration where address changes)
-        try:
-            if device.mode == DeviceMode.REGULAR:
-                pid = Solo2Device.REGULAR_PID
-            else:
-                pid = Solo2Device.BOOTLOADER_PID
-
-            still_connected = usb.core.find(
-                idVendor=Solo2Device.SOLOKEYS_VID, idProduct=pid
-            )
-            if still_connected:
-                # Device still there, just address changed - don't disconnect
-                return
-        except Exception:
-            pass
-
         # Actually disconnect
         self._devices.pop(device_id, None)
         device.disconnect()
@@ -108,26 +84,14 @@ class DeviceMonitor(QObject):
 
     def _scan_devices(self) -> None:
         """Scan for connected SoloKeys devices."""
-        found_regular = self._scan_regular_devices()
-        _log.debug("_scan_devices found_regular=%s", found_regular)
+        self._watcher.refresh()
+        found_regular = list_regular_descriptors()
+        found_bootloader = list_bootloader_descriptors()
+        _log.debug("_scan_devices found_regular=%s", [desc.id for desc in found_regular])
+        _log.debug("_scan_devices found_bootloader=%s", [desc.id for desc in found_bootloader])
 
-        try:
-            found_bootloader = list(
-                usb.core.find(
-                    idVendor=Solo2Device.SOLOKEYS_VID,
-                    idProduct=Solo2Device.BOOTLOADER_PID,
-                    find_all=True,
-                ) or []
-            )
-        except Exception:
-            found_bootloader = []
-        _log.debug(
-            "_scan_devices found_bootloader=%s",
-            [f"{dev.bus}-{dev.address}" for dev in found_bootloader],
-        )
-
-        current_ids = set(found_regular)
-        current_ids.update(f"{dev.bus}-{dev.address}" for dev in found_bootloader)
+        current_ids = {desc.id for desc in found_regular}
+        current_ids.update(desc.id for desc in found_bootloader)
 
         # Phase 1: Disconnect devices no longer present
         for device_id in list(self._devices.keys()):
@@ -137,28 +101,22 @@ class DeviceMonitor(QObject):
                 self.device_disconnected.emit(device_id)
 
         # Phase 2: Connect new devices
-        for device_id in found_regular:
-            if device_id in self._devices:
+        for descriptor in found_regular:
+            if descriptor.id in self._devices:
                 continue
 
-            device = Solo2Device(device_id, DeviceMode.REGULAR)
+            device = Solo2Device.from_descriptor(descriptor)
             if device.connect():
                 self._devices[device.path] = device
                 self.device_connected.emit(device)
 
-        for dev in found_bootloader:
-            device_id = f"{dev.bus}-{dev.address}"
-            if device_id in self._devices:
+        for descriptor in found_bootloader:
+            if descriptor.id in self._devices:
                 continue  # Already tracked
 
-            if dev.idProduct == Solo2Device.BOOTLOADER_PID:
-                mode = DeviceMode.BOOTLOADER
-            else:
-                continue
-
-            device = Solo2Device(device_id, mode)
+            device = Solo2Device.from_descriptor(descriptor)
             if device.connect():
-                self._devices[device_id] = device
+                self._devices[device.path] = device
                 self.device_connected.emit(device)
 
     def get_devices(self) -> List[SoloDevice]:
@@ -172,54 +130,3 @@ class DeviceMonitor(QObject):
     def refresh_devices(self) -> None:
         """Refresh the device list."""
         self._scan_devices()
-
-    def _scan_regular_devices(self) -> List[str]:
-        """Discover regular Solo 2 devices by HID and return stable IDs."""
-        tracked_regular = [d for d in self._devices.values() if d.mode == DeviceMode.REGULAR]
-        _log.debug(
-            "_scan_regular_devices tracked_regular=%s",
-            [device.path for device in tracked_regular],
-        )
-        if tracked_regular:
-            if self._regular_hid_present():
-                return [device.path for device in tracked_regular]
-            return []
-
-        discovered: List[str] = []
-        seen_ids = set()
-        try:
-            for hid_dev in list_ctap_hid_devices():
-                desc = getattr(hid_dev, "descriptor", None)
-                if not desc:
-                    continue
-                _log.debug(
-                    "_scan_devices HID: path=%r vid=0x%04x pid=0x%04x",
-                    getattr(desc, "path", None),
-                    getattr(desc, "vid", 0) or 0,
-                    getattr(desc, "pid", 0) or 0,
-                )
-                candidate = Solo2Device(f"hid:{desc.path!r}", DeviceMode.REGULAR)
-                if candidate.connect():
-                    _log.debug(
-                        "_scan_regular_devices connected candidate original=%r stable=%s",
-                        getattr(desc, "path", None),
-                        candidate.path,
-                    )
-                    if candidate.path not in seen_ids:
-                        discovered.append(candidate.path)
-                        seen_ids.add(candidate.path)
-        except Exception as e:
-            _log.debug("_scan_regular_devices failed: %s", e)
-        return discovered
-
-    def _regular_hid_present(self) -> bool:
-        """Return True while at least one HID device is still present."""
-        try:
-            for hid_dev in list_ctap_hid_devices():
-                desc = getattr(hid_dev, "descriptor", None)
-                if not desc:
-                    continue
-                return True
-        except Exception as e:
-            _log.debug("_regular_hid_present failed: %s", e)
-        return False

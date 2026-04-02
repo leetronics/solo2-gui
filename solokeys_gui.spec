@@ -116,6 +116,14 @@ a = Analysis(
     datas=datas,
     hiddenimports=[
         "hid",
+        "solo2",
+        "solo2.clients",
+        "solo2.device",
+        "solo2.discovery",
+        "solo2.errors",
+        "solo2.hid_backend",
+        "solo2.pcsc",
+        "solo2.transport",
         # fido2 — platform HID backend selected via importlib at runtime
         "fido2.hid",
         "fido2.hid.linux",
