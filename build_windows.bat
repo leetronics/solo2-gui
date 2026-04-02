@@ -183,22 +183,6 @@ if errorlevel 1 (
 )
 
 :: ---------------------------------------------------------------------------
-:: 6b. Run PyInstaller for the HID proxy service
-:: ---------------------------------------------------------------------------
-echo.
-echo Running PyInstaller for HID proxy service...
-python -m PyInstaller --clean --noconfirm solokeys_service.spec
-if errorlevel 1 (
-    echo Error: PyInstaller HID proxy service build failed.
-    exit /b 1
-)
-
-if not exist "dist\solokeys-service.exe" (
-    echo Error: PyInstaller did not produce dist\solokeys-service.exe
-    exit /b 1
-)
-
-:: ---------------------------------------------------------------------------
 :: 7. Build installer
 :: ---------------------------------------------------------------------------
 echo.

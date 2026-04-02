@@ -40,17 +40,12 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "dist\solokeys-service.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\SoloKeys GUI"; Filename: "{app}\SoloKeys GUI.exe"
 Name: "{autodesktop}\SoloKeys GUI"; Filename: "{app}\SoloKeys GUI.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{sys}\sc.exe"; Parameters: "create SoloKeysHID binPath=""{app}\solokeys-service.exe"" start=auto DisplayName=""SoloKeys HID Proxy"""; Flags: runhidden
-Filename: "{sys}\sc.exe"; Parameters: "start SoloKeysHID"; Flags: runhidden
 Filename: "{app}\SoloKeys GUI.exe"; Description: "Launch SoloKeys GUI"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{sys}\sc.exe"; Parameters: "stop SoloKeysHID"; Flags: runhidden
-Filename: "{sys}\sc.exe"; Parameters: "delete SoloKeysHID"; Flags: runhidden
