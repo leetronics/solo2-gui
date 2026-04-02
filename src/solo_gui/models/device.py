@@ -2,42 +2,18 @@
 
 import logging
 import struct
-import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, timedelta
 from enum import Enum
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 import usb.core
 from fido2.ctap2 import Ctap2
 
 from ..hid_backend import list_ctap_hid_devices
-
-
-def _get_log_path() -> Path:
-    if sys.platform == "win32":
-        base = Path.home()
-        local_appdata = Path(
-            __import__("os").environ.get("LOCALAPPDATA", base / "AppData" / "Local")
-        )
-        data_dir = local_appdata / "solokeys-gui"
-    elif sys.platform == "darwin":
-        data_dir = Path.home() / "Library" / "Application Support" / "solokeys-gui"
-    else:
-        data_dir = Path.home() / ".local" / "share" / "solokeys-gui"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir / "solokeys-debug.log"
-
-
-_log_path = _get_log_path()
-logging.basicConfig(
-    filename=str(_log_path),
-    filemode="a",
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+from ..logging_utils import get_log_path
+_log_path = get_log_path()
 _log = logging.getLogger("solo2device")
 
 
@@ -293,13 +269,29 @@ class Solo2Device(SoloDevice):
         try:
             resp = hid_device.call(0x61, b'')
             if len(resp) < 4:
+                _log.debug(
+                    "_get_firmware_version_from_hid short response path=%r len=%d",
+                    getattr(getattr(hid_device, "descriptor", None), "path", None),
+                    len(resp),
+                )
                 return None
             version = struct.unpack('>I', resp[:4])[0]
             major = version >> 22
             minor = (version >> 6) & ((1 << 16) - 1)
             patch = version & ((1 << 6) - 1)
-            return f"{major}.{minor}.{patch}"
-        except Exception:
+            semver = f"{major}.{minor}.{patch}"
+            _log.debug(
+                "_get_firmware_version_from_hid success path=%r version=%s",
+                getattr(getattr(hid_device, "descriptor", None), "path", None),
+                semver,
+            )
+            return semver
+        except Exception as e:
+            _log.debug(
+                "_get_firmware_version_from_hid failed path=%r err=%s",
+                getattr(getattr(hid_device, "descriptor", None), "path", None),
+                e,
+            )
             return None
 
     def _get_uuid_from_hid(self, hid_device) -> Optional[str]:
@@ -307,13 +299,29 @@ class Solo2Device(SoloDevice):
         try:
             resp = hid_device.call(0x62, b"")
             if len(resp) < 16:
+                _log.debug(
+                    "_get_uuid_from_hid short response path=%r len=%d",
+                    getattr(getattr(hid_device, "descriptor", None), "path", None),
+                    len(resp),
+                )
                 return None
             uuid_hex = resp[:16].hex()
-            return (
+            uuid_str = (
                 f"{uuid_hex[:8]}-{uuid_hex[8:12]}-{uuid_hex[12:16]}-"
                 f"{uuid_hex[16:20]}-{uuid_hex[20:32]}"
             )
-        except Exception:
+            _log.debug(
+                "_get_uuid_from_hid success path=%r uuid=%s",
+                getattr(getattr(hid_device, "descriptor", None), "path", None),
+                uuid_str,
+            )
+            return uuid_str
+        except Exception as e:
+            _log.debug(
+                "_get_uuid_from_hid failed path=%r err=%s",
+                getattr(getattr(hid_device, "descriptor", None), "path", None),
+                e,
+            )
             return None
 
     def _get_firmware_version_pcsc_reader(self, reader) -> Optional[str]:
@@ -438,23 +446,48 @@ class Solo2Device(SoloDevice):
         """Open a fresh HID device handle for this device."""
         fallback = None
         allow_fallback = self._device_uuid is None and not self.path.startswith("uuid:")
+        _log.debug(
+            "open_hid_device start path=%s uuid=%s hid_path=%r allow_fallback=%s",
+            self.path,
+            self._device_uuid,
+            self._hid_path,
+            allow_fallback,
+        )
         for hid_device in list_ctap_hid_devices():
             desc = getattr(hid_device, "descriptor", None)
             if not desc:
                 continue
+            _log.debug(
+                "open_hid_device candidate path=%r vid=0x%04x pid=0x%04x",
+                getattr(desc, "path", None),
+                getattr(desc, "vid", 0) or 0,
+                getattr(desc, "pid", 0) or 0,
+            )
             if allow_fallback and fallback is None:
                 version = self._get_firmware_version_from_hid(hid_device)
                 if version:
                     fallback = hid_device
+                    _log.debug(
+                        "open_hid_device fallback selected path=%r version=%s",
+                        getattr(desc, "path", None),
+                        version,
+                    )
             if self._matches_hid_device(hid_device):
                 self._hid_path = getattr(desc, "path", None)
+                _log.debug("open_hid_device matched path=%r", self._hid_path)
                 return hid_device
         if allow_fallback and fallback is not None:
             desc = getattr(fallback, "descriptor", None)
             self._hid_path = getattr(desc, "path", None)
             if self._device_uuid is None:
                 self._device_uuid = self._get_uuid_from_hid(fallback)
+            _log.debug(
+                "open_hid_device returning fallback path=%r uuid=%s",
+                self._hid_path,
+                self._device_uuid,
+            )
             return fallback
+        _log.debug("open_hid_device no device found for path=%s", self.path)
         return None
 
     def open_ctap2(self) -> Optional[Ctap2]:

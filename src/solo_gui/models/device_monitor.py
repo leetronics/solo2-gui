@@ -109,6 +109,7 @@ class DeviceMonitor(QObject):
     def _scan_devices(self) -> None:
         """Scan for connected SoloKeys devices."""
         found_regular = self._scan_regular_devices()
+        _log.debug("_scan_devices found_regular=%s", found_regular)
 
         try:
             found_bootloader = list(
@@ -120,6 +121,10 @@ class DeviceMonitor(QObject):
             )
         except Exception:
             found_bootloader = []
+        _log.debug(
+            "_scan_devices found_bootloader=%s",
+            [f"{dev.bus}-{dev.address}" for dev in found_bootloader],
+        )
 
         current_ids = set(found_regular)
         current_ids.update(f"{dev.bus}-{dev.address}" for dev in found_bootloader)
@@ -171,6 +176,10 @@ class DeviceMonitor(QObject):
     def _scan_regular_devices(self) -> List[str]:
         """Discover regular Solo 2 devices by HID and return stable IDs."""
         tracked_regular = [d for d in self._devices.values() if d.mode == DeviceMode.REGULAR]
+        _log.debug(
+            "_scan_regular_devices tracked_regular=%s",
+            [device.path for device in tracked_regular],
+        )
         if tracked_regular:
             if self._regular_hid_present():
                 return [device.path for device in tracked_regular]
@@ -191,6 +200,11 @@ class DeviceMonitor(QObject):
                 )
                 candidate = Solo2Device(f"hid:{desc.path!r}", DeviceMode.REGULAR)
                 if candidate.connect():
+                    _log.debug(
+                        "_scan_regular_devices connected candidate original=%r stable=%s",
+                        getattr(desc, "path", None),
+                        candidate.path,
+                    )
                     if candidate.path not in seen_ids:
                         discovered.append(candidate.path)
                         seen_ids.add(candidate.path)
