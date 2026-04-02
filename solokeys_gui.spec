@@ -115,6 +115,7 @@ a = Analysis(
     binaries=platform_binaries,
     datas=datas,
     hiddenimports=[
+        "hid",
         # fido2 — platform HID backend selected via importlib at runtime
         "fido2.hid",
         "fido2.hid.linux",

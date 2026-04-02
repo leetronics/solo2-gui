@@ -19,8 +19,10 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
+        'hid',
         # Our own modules (lazy-imported inside _handle_direct)
         'solo_gui.device_transport',
+        'solo_gui.hid_backend',
         'solo_gui.oath_bridge',
         # fido2 core
         'fido2',

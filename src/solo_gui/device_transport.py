@@ -8,8 +8,10 @@ import os
 import struct
 import time
 
-from fido2.hid import CtapHidDevice, CTAPHID
 from fido2.ctap2 import Ctap2
+from fido2.hid import CTAPHID
+
+from .hid_backend import list_ctap_hid_devices
 
 
 class DeviceTransport:
@@ -39,7 +41,7 @@ class DeviceTransport:
 
     def open(self) -> None:
         """Open the first available SoloKeys HID device."""
-        for hid_dev in CtapHidDevice.list_devices():
+        for hid_dev in list_ctap_hid_devices():
             try:
                 self._ctap2 = Ctap2(hid_dev)
                 return

@@ -12,7 +12,8 @@ from typing import List, Optional, Tuple
 
 import usb.core
 from fido2.ctap2 import Ctap2
-from fido2.hid import CtapHidDevice
+
+from ..hid_backend import list_ctap_hid_devices
 
 
 def _get_log_path() -> Path:
@@ -437,7 +438,7 @@ class Solo2Device(SoloDevice):
         """Open a fresh HID device handle for this device."""
         fallback = None
         allow_fallback = self._device_uuid is None and not self.path.startswith("uuid:")
-        for hid_device in CtapHidDevice.list_devices():
+        for hid_device in list_ctap_hid_devices():
             desc = getattr(hid_device, "descriptor", None)
             if not desc:
                 continue

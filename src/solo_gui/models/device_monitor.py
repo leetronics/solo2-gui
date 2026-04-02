@@ -4,9 +4,9 @@ import logging
 from typing import Dict, List, Optional
 
 import usb.core
-from fido2.hid import CtapHidDevice
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from ..hid_backend import list_ctap_hid_devices
 from .device import DeviceMode, Solo2Device, SoloDevice
 from ..utils.usb_monitor import USBMonitor
 
@@ -179,7 +179,7 @@ class DeviceMonitor(QObject):
         discovered: List[str] = []
         seen_ids = set()
         try:
-            for hid_dev in CtapHidDevice.list_devices():
+            for hid_dev in list_ctap_hid_devices():
                 desc = getattr(hid_dev, "descriptor", None)
                 if not desc:
                     continue
@@ -201,7 +201,7 @@ class DeviceMonitor(QObject):
     def _regular_hid_present(self) -> bool:
         """Return True while at least one HID device is still present."""
         try:
-            for hid_dev in CtapHidDevice.list_devices():
+            for hid_dev in list_ctap_hid_devices():
                 desc = getattr(hid_dev, "descriptor", None)
                 if not desc:
                     continue
