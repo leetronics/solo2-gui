@@ -9,7 +9,9 @@
 setlocal enabledelayedexpansion
 
 set APP_NAME=SoloKeys GUI
-set APP_VERSION=0.1.0
+for /f "tokens=2 delims==" %%v in ('findstr /r "^version" pyproject.toml') do set APP_VERSION=%%v
+set APP_VERSION=%APP_VERSION: =%
+set APP_VERSION=%APP_VERSION:"=%
 set APP_DIR=dist\%APP_NAME%
 set HOST_EXE=dist\solokeys-secrets-host.exe
 set INSTALLER_OUTPUT=dist\installer\SoloKeys-GUI-Setup-%APP_VERSION%.exe

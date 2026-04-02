@@ -1,10 +1,6 @@
 """App update-check worker for SoloKeys GUI."""
 
-try:
-    from importlib.metadata import version as _pkg_version
-    APP_VERSION = _pkg_version("solo-gui")
-except Exception:
-    APP_VERSION = "0.1.0"
+from solo_gui import __version__ as APP_VERSION
 
 GITHUB_REPO = "leetronics/solo2-gui"
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"

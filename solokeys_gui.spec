@@ -12,6 +12,7 @@ Build with:
 """
 
 import os
+import re
 import sys
 import importlib.util
 from pathlib import Path
@@ -21,6 +22,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 project_root = Path(SPECPATH)          # directory containing this .spec file
 src_root     = project_root / "src"   # compensates for main.py sys.path hack
+
+# ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+_version_match = re.search(r'^version\s*=\s*"([^"]+)"', (project_root / "pyproject.toml").read_text(), re.MULTILINE)
+APP_VERSION = _version_match.group(1) if _version_match else "0.0.0"
 
 # ---------------------------------------------------------------------------
 # Platform-specific libusb detection
@@ -212,18 +219,13 @@ if sys.platform == "darwin":
         name="SoloKeys GUI.app",
         icon=str(project_root / "src" / "solo_gui" / "resources" / "logo-square.png"),
         bundle_identifier="com.solokeys.solokeys-gui",
-        version="0.1.0",
+        version=APP_VERSION,
         info_plist={
             "LSMinimumSystemVersion": "12.0",
             "NSHighResolutionCapable": True,
             "NSHumanReadableCopyright": "SoloKeys GUI Contributors",
-            # Describe USB/HID access for macOS privacy dialogs
-            "NSUSBDeviceUsageDescriptionKey": (
-                "SoloKeys GUI needs access to your SoloKeys device "
-                "for FIDO2, PIV, and firmware management."
-            ),
             "CFBundleDisplayName": "SoloKeys GUI",
-            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleShortVersionString": APP_VERSION,
         },
     )
 

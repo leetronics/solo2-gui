@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QSize, QThread, QMetaObject, QEvent
 from PySide6.QtGui import QIcon, QAction
+from solo_gui import __version__
 
 # Try to import QtAwesome for better icons, fallback to QStyle if not available
 try:
@@ -620,7 +621,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About SoloKeys GUI",
-            "SoloKeys GUI v0.1.0\n\n"
+            f"SoloKeys GUI v{__version__}\n\n"
             "Platform-independent GUI for managing SoloKeys Solo 2 FIDO2 tokens.\n\n"
             "© 2024 SoloKeys GUI Team",
         )

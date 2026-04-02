@@ -6,6 +6,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-macos:
     name: macOS
@@ -33,7 +36,7 @@ jobs:
         with:
           tag_name: ci-latest
           draft: true
-          files: dist/SoloKeys GUI-0.1.0.dmg
+          files: dist/SoloKeys GUI-*.dmg
 
   build-windows:
     name: Windows
@@ -79,4 +82,34 @@ jobs:
         with:
           tag_name: ci-latest
           draft: true
-          files: dist/installer/SoloKeys-GUI-Setup-0.1.0.exe
+          files: dist/installer/SoloKeys-GUI-Setup-*.exe
+
+  build-linux:
+    name: Linux
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libfuse2
+
+      - name: Build AppImage
+        run: |
+          chmod +x build_linux.sh
+          ./build_linux.sh
+
+      - name: Upload Linux to draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-latest
+          draft: true
+          files: dist/SoloKeys-GUI-*.AppImage

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 APP_NAME="SoloKeys GUI"
-APP_VERSION="0.1.0"
+APP_VERSION=$(grep -oP '^version\s*=\s*"\K[^"]+' pyproject.toml)
 DMG_NAME="SoloKeys GUI-${APP_VERSION}.dmg"
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ sys.path.insert(0, str(current_dir.parent))
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QTimer, Qt
+from solo_gui import __version__
 from solo_gui.views.main_window import MainWindow
 from solo_gui.browser_server import BrowserServer
 from solo_gui import native_host_installer
@@ -115,7 +116,7 @@ def main() -> None:
     """Main entry point for the application."""
     app = QApplication(sys.argv)
     app.setApplicationName("SoloKeys GUI")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("SoloKeys")
     app.setQuitOnLastWindowClosed(True)
 
