@@ -599,6 +599,9 @@ class MainWindow(QMainWindow):
             self._hacker_btn,
         )
         for tab, btn in self._tab_buttons.items():
+            if btn is self._settings_btn:
+                btn.setEnabled(True)
+                continue
             if btn in dynamic_btns:
                 btn.setEnabled(enabled and btn.isVisible())
             else:
