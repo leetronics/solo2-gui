@@ -11,6 +11,7 @@ Security is enforced by Chrome via allowed_origins in the native messaging manif
 """
 
 import json
+import logging
 import os
 import socket as _socket
 import struct
@@ -23,6 +24,8 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from solo_gui.device_manager import DeviceManager
+
+_log = logging.getLogger("solo2device")
 
 
 def _get_data_dir() -> Path:
@@ -56,7 +59,18 @@ class BrowserServer(QObject):
 
     def start(self) -> None:
         if sys.platform == "win32":
-            self._pipe_listener = Listener(address=_PIPE_NAME, family="AF_PIPE")
+            try:
+                self._pipe_listener = Listener(address=_PIPE_NAME, family="AF_PIPE")
+            except PermissionError as e:
+                self._pipe_listener = None
+                _log.warning("BrowserServer pipe unavailable on Windows: %s", e)
+                print(f"[BrowserServer] Named pipe unavailable, browser IPC disabled: {e}")
+                return
+            except OSError as e:
+                self._pipe_listener = None
+                _log.warning("BrowserServer failed to open named pipe: %s", e)
+                print(f"[BrowserServer] Failed to open named pipe, browser IPC disabled: {e}")
+                return
 
             t = threading.Thread(target=self._accept_loop, daemon=True)
             t.start()
