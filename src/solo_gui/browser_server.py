@@ -17,6 +17,7 @@ import socket as _socket
 import struct
 import sys
 import threading
+import time
 from multiprocessing.connection import Listener
 from pathlib import Path
 from typing import Optional
@@ -59,17 +60,28 @@ class BrowserServer(QObject):
 
     def start(self) -> None:
         if sys.platform == "win32":
-            try:
-                self._pipe_listener = Listener(address=_PIPE_NAME, family="AF_PIPE")
-            except PermissionError as e:
-                self._pipe_listener = None
-                _log.warning("BrowserServer pipe unavailable on Windows: %s", e)
-                print(f"[BrowserServer] Named pipe unavailable, browser IPC disabled: {e}")
-                return
-            except OSError as e:
-                self._pipe_listener = None
-                _log.warning("BrowserServer failed to open named pipe: %s", e)
-                print(f"[BrowserServer] Failed to open named pipe, browser IPC disabled: {e}")
+            last_error: Exception | None = None
+            for attempt in range(20):
+                try:
+                    self._pipe_listener = Listener(address=_PIPE_NAME, family="AF_PIPE")
+                    break
+                except PermissionError as e:
+                    last_error = e
+                    self._pipe_listener = None
+                except OSError as e:
+                    last_error = e
+                    self._pipe_listener = None
+
+                if attempt < 19:
+                    time.sleep(0.25)
+                    continue
+
+            if self._pipe_listener is None:
+                _log.warning("BrowserServer pipe unavailable on Windows: %s", last_error)
+                print(
+                    "[BrowserServer] Named pipe unavailable, browser IPC disabled: "
+                    f"{last_error}"
+                )
                 return
 
             t = threading.Thread(target=self._accept_loop, daemon=True)

@@ -4,7 +4,9 @@
 import os
 import signal
 import sys
+import time
 import configparser
+import ctypes
 from pathlib import Path
 
 # Add src directory to path for imports
@@ -113,9 +115,47 @@ def _get_icon_path() -> Path:
         return _ICON_RESOURCES_DIR / "logo-light.png"
 
 
+def _consume_wait_for_parent_pid_arg(argv: list[str]) -> int | None:
+    """Extract and remove a restart synchronization argument from argv."""
+    prefix = "--wait-for-parent-pid="
+    for idx, arg in enumerate(list(argv)):
+        if not arg.startswith(prefix):
+            continue
+        del argv[idx]
+        try:
+            return int(arg[len(prefix):])
+        except ValueError:
+            return None
+    return None
+
+
+def _wait_for_parent_pid_exit(parent_pid: int, timeout: float = 10.0) -> None:
+    """Wait briefly for a previous GUI instance to terminate on Windows."""
+    if sys.platform != "win32" or parent_pid <= 0:
+        return
+
+    try:
+        synchronize = 0x00100000
+        handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, parent_pid)
+    except Exception:
+        return
+
+    if not handle:
+        return
+
+    try:
+        ctypes.windll.kernel32.WaitForSingleObject(handle, int(timeout * 1000))
+        time.sleep(0.25)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
 def main() -> None:
     """Main entry point for the application."""
     log_path = setup_logging()
+    parent_pid = _consume_wait_for_parent_pid_arg(sys.argv)
+    if parent_pid is not None:
+        _wait_for_parent_pid_exit(parent_pid)
 
     app = QApplication(sys.argv)
     app.setApplicationName("SoloKeys GUI")

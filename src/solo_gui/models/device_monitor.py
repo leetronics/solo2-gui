@@ -1,6 +1,7 @@
 """Device manager for SoloKeys GUI."""
 
 import logging
+import sys
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -27,6 +28,8 @@ class DeviceMonitor(QObject):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._scan_devices)
+        self._missing_scans: Dict[str, int] = {}
+        self._disconnect_grace_scans = 3 if sys.platform == "win32" else 1
 
     def start_monitoring(self) -> None:
         """Start monitoring for device changes."""
@@ -50,6 +53,7 @@ class DeviceMonitor(QObject):
     def stop_monitoring(self) -> None:
         """Stop monitoring for device changes."""
         self._poll_timer.stop()
+        self._missing_scans.clear()
         if self._usb_monitor:
             self._usb_monitor.stop()
             self._usb_monitor = None
@@ -64,6 +68,7 @@ class DeviceMonitor(QObject):
                     device = Solo2Device.from_descriptor(descriptor)
                     if device.connect():
                         self._devices[device.path] = device
+                        self._missing_scans.pop(device.path, None)
                         self.device_connected.emit(device)
                     break
         except Exception:
@@ -79,6 +84,7 @@ class DeviceMonitor(QObject):
 
         # Actually disconnect
         self._devices.pop(device_id, None)
+        self._missing_scans.pop(device_id, None)
         device.disconnect()
         self.device_disconnected.emit(device_id)
 
@@ -93,12 +99,31 @@ class DeviceMonitor(QObject):
         current_ids = {desc.id for desc in found_regular}
         current_ids.update(desc.id for desc in found_bootloader)
 
-        # Phase 1: Disconnect devices no longer present
+        for device_id in current_ids:
+            self._missing_scans.pop(device_id, None)
+
+        # Phase 1: Disconnect devices no longer present. On Windows we require
+        # several consecutive misses because CCID/SetupAPI polling can
+        # transiently fail even while the token is still plugged in.
         for device_id in list(self._devices.keys()):
-            if device_id not in current_ids:
-                device = self._devices.pop(device_id)
-                device.disconnect()
-                self.device_disconnected.emit(device_id)
+            if device_id in current_ids:
+                continue
+
+            misses = self._missing_scans.get(device_id, 0) + 1
+            self._missing_scans[device_id] = misses
+            if misses < self._disconnect_grace_scans:
+                _log.debug(
+                    "_scan_devices delaying disconnect device_id=%s misses=%d/%d",
+                    device_id,
+                    misses,
+                    self._disconnect_grace_scans,
+                )
+                continue
+
+            device = self._devices.pop(device_id)
+            self._missing_scans.pop(device_id, None)
+            device.disconnect()
+            self.device_disconnected.emit(device_id)
 
         # Phase 2: Connect new devices
         for descriptor in found_regular:
@@ -108,6 +133,7 @@ class DeviceMonitor(QObject):
             device = Solo2Device.from_descriptor(descriptor)
             if device.connect():
                 self._devices[device.path] = device
+                self._missing_scans.pop(device.path, None)
                 self.device_connected.emit(device)
 
         for descriptor in found_bootloader:
@@ -117,6 +143,7 @@ class DeviceMonitor(QObject):
             device = Solo2Device.from_descriptor(descriptor)
             if device.connect():
                 self._devices[device.path] = device
+                self._missing_scans.pop(device.path, None)
                 self.device_connected.emit(device)
 
     def get_devices(self) -> List[SoloDevice]:

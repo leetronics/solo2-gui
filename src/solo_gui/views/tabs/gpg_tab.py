@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QTextEdit,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
 from solo_gui.models.device import SoloDevice, firmware_supports_extended_applets
@@ -441,7 +441,7 @@ class GpgTab(QWidget):
 
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
-        self.gpg_availability.emit(self._should_show_tab())
+        self.gpg_availability.emit(False)
         self._setup_worker()
         if self._worker:
             self._worker.probe_gpg()
@@ -511,7 +511,7 @@ class GpgTab(QWidget):
     # ------------------------------------------------------------------
 
     def _on_gpg_probed(self, available: bool) -> None:
-        self.gpg_availability.emit(self._should_show_tab())
+        self.gpg_availability.emit(available and self._should_show_tab())
         if available:
             self._pcsc_warning_label.setVisible(False)
             self._set_controls_enabled(True)
@@ -541,11 +541,19 @@ class GpgTab(QWidget):
         if success:
             self._last_pubkey_bytes = pubkey_bytes
             self._last_pubkey_slot = slot
-            if pubkey_bytes:
-                self._show_pubkey_dialog(pubkey_bytes, slot)
-            else:
-                QMessageBox.information(self, "Success", "Key generated successfully")
-            self._reload_status()
+            try:
+                if pubkey_bytes:
+                    self._show_pubkey_dialog(pubkey_bytes, slot)
+                else:
+                    QMessageBox.information(self, "Success", "Key generated successfully")
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Key Generated",
+                    f"Key generation succeeded, but displaying the public key failed:\n{exc}",
+                )
+            # Give the OpenPGP applet a brief moment before reconnecting for status.
+            QTimer.singleShot(200, self._reload_status)
         else:
             QMessageBox.critical(self, "Error", f"Failed to generate key: {error}")
 

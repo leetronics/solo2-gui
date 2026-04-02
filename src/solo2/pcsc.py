@@ -56,13 +56,16 @@ def _build_apdu(cla: int, ins: int, p1: int = 0, p2: int = 0, data: bytes = b"",
         else:
             apdu.extend((0x00, (len(data) >> 8) & 0xFF, len(data) & 0xFF))
         apdu.extend(data)
-    elif le is not None:
-        apdu.append(0x00)
     if le is not None:
-        if le <= 255:
+        if data:
+            if le <= 255:
+                apdu.append(le)
+            else:
+                apdu.extend(((le >> 8) & 0xFF, le & 0xFF))
+        elif le <= 255:
             apdu.append(le)
         else:
-            apdu.extend(((le >> 8) & 0xFF, le & 0xFF))
+            apdu.extend((0x00, (le >> 8) & 0xFF, le & 0xFF))
     return bytes(apdu)
 
 
@@ -77,12 +80,14 @@ class Solo2PcscConnection:
     def __init__(self, connection, reader_name: str):
         self._connection = connection
         self.reader_name = reader_name
+        self._selected_aid: bytes | None = None
 
     def close(self) -> None:
         try:
             self._connection.disconnect()
         except Exception:
             pass
+        self._selected_aid = None
 
     def _transmit(self, apdu: bytes) -> tuple[bytes, int, int]:
         data, sw1, sw2 = self._connection.transmit(list(apdu))
@@ -100,15 +105,18 @@ class Solo2PcscConnection:
         payload, sw1, sw2 = self._transmit_all(_build_apdu(0x00, 0xA4, 0x04, 0x00, aid))
         if (sw1, sw2) != SW_SUCCESS:
             raise RuntimeError(f"SELECT failed on {self.reader_name}: SW={sw1:02X}{sw2:02X}")
+        self._selected_aid = aid
         return payload
 
     def call_secrets(self, apdu: bytes) -> bytes:
-        self.select(SECRETS_AID)
+        if self._selected_aid != SECRETS_AID:
+            self.select(SECRETS_AID)
         payload, sw1, sw2 = self._transmit_all(apdu)
         return bytes([sw1, sw2]) + payload
 
     def call_admin(self, command: int, data: bytes = b"", response_len: Optional[int] = None) -> bytes:
-        self.select(ADMIN_AID)
+        if self._selected_aid != ADMIN_AID:
+            self.select(ADMIN_AID)
         p1 = data[0] if data else 0x00
         payload = self._transmit_all(_build_apdu(0x00, command, 0x00, p1, data, response_len))
         body, sw1, sw2 = payload

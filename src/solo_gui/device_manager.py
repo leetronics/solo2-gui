@@ -80,6 +80,7 @@ class DeviceManager(QObject):
         self._pin_protocol = None
         self._credman: Optional[CredentialManagement] = None
         self._cached_pin: Optional[str] = None
+        self._last_auth_error: Optional[str] = None
         self._request_queue: Queue = Queue()
         self._worker_thread: Optional[QThread] = None
         self._running = False
@@ -134,6 +135,7 @@ class DeviceManager(QObject):
             _log.debug("_open_device: looking for device=%r", getattr(self._device, "path", None))
             self._ctap2 = self._device.open_ctap2()
             if self._ctap2 is not None:
+                self._reset_hid_channel()
                 _log.debug("_open_device: SUCCESS")
                 return True
             _log.debug("_open_device: FAILED — device.open_ctap2() returned None")
@@ -151,15 +153,9 @@ class DeviceManager(QObject):
         self._client_pin = None
         self._pin_token = None
         self._credman = None
-    
-    def _reopen_device(self) -> bool:
-        """Reopen device connection (after error)."""
-        self._close_device()
-        time.sleep(0.1)  # Brief delay to let USB settle
-        if not self._open_device():
-            return False
-        
-        # Reset CTAPHID channel (skip for pipe device — no channel concept)
+
+    def _reset_hid_channel(self) -> None:
+        """Re-initialize the CTAP HID channel for the current device, if any."""
         try:
             if self._ctap2:
                 hid_dev = self._ctap2.device
@@ -168,9 +164,15 @@ class DeviceManager(QObject):
                 response = hid_dev.call(CTAPHID.INIT, nonce)
                 if response[:8] == nonce:
                     (hid_dev._channel_id,) = struct.unpack_from(">I", response, 8)
-        except Exception:
-            pass  # Ignore errors during channel reset
-        
+        except Exception as exc:
+            _log.debug("_reset_hid_channel failed: %s", exc)
+
+    def _reopen_device(self) -> bool:
+        """Reopen device connection (after error)."""
+        self._close_device()
+        time.sleep(0.1)  # Brief delay to let USB settle
+        if not self._open_device():
+            return False
         return True
     
     def _wait_for_device(self, timeout: float = 10.0) -> bool:
@@ -243,26 +245,56 @@ class DeviceManager(QObject):
     
     def _ensure_authenticated(self, pin: str) -> bool:
         """Ensure we have valid PIN token for CredMan operations."""
+        self._last_auth_error = None
         if self._ctap2 is None:
             if not self._reopen_device():
+                self._last_auth_error = "Device not connected"
                 return False
-        
-        try:
-            if self._client_pin is None:
-                self._client_pin = ClientPin(self._ctap2)
-            
-            self._pin_protocol = self._client_pin.protocol
-            self._pin_token = self._client_pin.get_pin_token(
-                pin, ClientPin.PERMISSION.CREDENTIAL_MGMT
-            )
-            self._cached_pin = pin
-            
-            self._credman = CredentialManagement(
-                self._ctap2, self._pin_protocol, self._pin_token
-            )
-            return True
-        except Exception:
-            return False
+
+        permissions = [ClientPin.PERMISSION.CREDENTIAL_MGMT]
+        persistent_cred_mgmt = getattr(
+            ClientPin.PERMISSION, "PERSISTENT_CREDENTIAL_MGMT", None
+        )
+        if persistent_cred_mgmt is not None:
+            permissions.append(persistent_cred_mgmt)
+
+        last_error: Exception | None = None
+        for attempt in range(2):
+            self._client_pin = None
+            self._pin_token = None
+            self._credman = None
+
+            for permission in permissions:
+                try:
+                    self._client_pin = ClientPin(self._ctap2)
+                    self._pin_protocol = self._client_pin.protocol
+                    self._pin_token = self._client_pin.get_pin_token(pin, permission)
+                    self._cached_pin = pin
+                    self._credman = CredentialManagement(
+                        self._ctap2, self._pin_protocol, self._pin_token
+                    )
+                    self._last_auth_error = None
+                    return True
+                except Exception as exc:
+                    last_error = exc
+                    _log.debug(
+                        "_ensure_authenticated failed permission=%s err=%s",
+                        permission,
+                        exc,
+                    )
+
+            error_text = str(last_error).lower() if last_error else ""
+            if "wrong channel" not in error_text and "wrong_channel" not in error_text:
+                break
+            if not self._reopen_device():
+                break
+
+        if last_error is None:
+            self._last_auth_error = "Authentication failed"
+        else:
+            message = str(last_error).strip() or last_error.__class__.__name__
+            self._last_auth_error = message
+        return False
     
     def _do_get_info(self, request: DeviceRequest):
         """Execute GET_INFO request."""
@@ -279,6 +311,7 @@ class DeviceManager(QObject):
                     'versions': [],
                     'options': {},
                     'firmware_version': info.firmware_version,
+                    'ctap2_available': False,
                 }
                 request.callback(result, None)
                 return
@@ -290,6 +323,7 @@ class DeviceManager(QObject):
                 'aaguid': info.aaguid,
                 'versions': info.versions,
                 'options': opts,
+                'ctap2_available': True,
             }
             request.callback(result, None)
         except Exception as e:
@@ -302,6 +336,7 @@ class DeviceManager(QObject):
                             'aaguid': info.aaguid,
                             'versions': info.versions,
                             'options': dict(info.options) if info.options else {},
+                            'ctap2_available': True,
                         }
                         request.callback(result, None)
                         return
@@ -372,7 +407,10 @@ class DeviceManager(QObject):
             command = request.args['command']
             data = request.args['data']
             if self._ctap2 is None and self._device is not None:
-                response = self._device.admin().call(command, data)
+                if command == 0x70:
+                    response = self._device.secrets().send_apdu(data)
+                else:
+                    response = self._device.admin().call(command, data)
                 request.callback(response, None)
                 return
             response = self._ctap2.device.call(command, data)
@@ -404,7 +442,7 @@ class DeviceManager(QObject):
             return
         
         if not self._ensure_authenticated(pin):
-            request.callback(None, "Authentication failed")
+            request.callback(None, self._last_auth_error or "Authentication failed")
             return
         
         try:
@@ -457,7 +495,7 @@ class DeviceManager(QObject):
             return
         
         if not self._ensure_authenticated(pin):
-            request.callback(None, "Authentication failed")
+            request.callback(None, self._last_auth_error or "Authentication failed")
             return
         
         try:
@@ -478,7 +516,7 @@ class DeviceManager(QObject):
             return
         
         if not self._ensure_authenticated(pin):
-            request.callback(None, "Authentication failed")
+            request.callback(None, self._last_auth_error or "Authentication failed")
             return
         
         try:

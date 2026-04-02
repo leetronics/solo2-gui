@@ -3,6 +3,7 @@
 from typing import Optional, List, Dict
 
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -23,6 +24,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, QTimer
 
 from solo_gui.models.device import SoloDevice
+from solo_gui.utils.windows_elevation import (
+    can_restart_as_admin,
+    is_windows_admin,
+    restart_as_admin,
+)
 from solo_gui.workers.fido2_worker import Fido2Worker, Fido2Credential
 
 
@@ -212,6 +218,22 @@ class Fido2Tab(QWidget):
         pin_actions_layout.addStretch()
         pin_layout.addLayout(pin_actions_layout)
 
+        self._transport_hint_label = QLabel("")
+        self._transport_hint_label.setWordWrap(True)
+        self._transport_hint_label.setStyleSheet(
+            "background-color: #fff3cd; padding: 8px; border-radius: 5px;"
+        )
+        self._transport_hint_label.setVisible(False)
+        pin_layout.addWidget(self._transport_hint_label)
+
+        hint_actions_layout = QHBoxLayout()
+        self._restart_admin_button = QPushButton("Restart as Administrator")
+        self._restart_admin_button.clicked.connect(self._restart_as_admin)
+        self._restart_admin_button.setVisible(False)
+        hint_actions_layout.addWidget(self._restart_admin_button)
+        hint_actions_layout.addStretch()
+        pin_layout.addLayout(hint_actions_layout)
+
         # Status section
         status_layout = QHBoxLayout()
         status_layout.addWidget(QLabel("Status:"))
@@ -257,6 +279,8 @@ class Fido2Tab(QWidget):
         self._credentials_table.setRowCount(0)
         self._pin_status_label.setText("Unknown")
         self._status_label.setText("No device connected")
+        self._transport_hint_label.setVisible(False)
+        self._restart_admin_button.setVisible(False)
         self._set_buttons_enabled(False)
 
     def _setup_worker(self) -> None:
@@ -300,6 +324,25 @@ class Fido2Tab(QWidget):
         self._refresh_button.setEnabled(enabled)
         self._change_pin_button.setEnabled(enabled)
         self._set_pin_button.setEnabled(enabled)
+
+    def _set_transport_hint(self, message: str = "", *, show_restart: bool = False) -> None:
+        """Show or hide the Windows-specific CTAP HID transport hint."""
+        visible = bool(message)
+        self._transport_hint_label.setVisible(visible)
+        self._transport_hint_label.setText(message)
+        self._restart_admin_button.setVisible(visible and show_restart)
+
+    def _restart_as_admin(self) -> None:
+        """Restart the GUI with Windows Administrator rights."""
+        ok, error = restart_as_admin()
+        if ok:
+            QApplication.instance().quit()
+            return
+        QMessageBox.critical(
+            self,
+            "Restart Failed",
+            f"Could not restart the GUI as Administrator:\n{error}",
+        )
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
         """Set busy state with progress indicator."""
@@ -471,9 +514,42 @@ class Fido2Tab(QWidget):
 
     def _on_pin_status_updated(self, status: dict) -> None:
         """Handle PIN status update."""
+        ctap2_available = status.get("ctap2_available", True)
         pin_set = status.get("pin_set", False)
         retries = status.get("pin_retries")
         cred_mgmt = status.get("cred_mgmt_supported", False)
+
+        if not ctap2_available:
+            self._pin_status_label.setText("CTAP HID not available")
+            self._change_pin_button.setEnabled(False)
+            self._set_pin_button.setEnabled(False)
+            self._refresh_button.setEnabled(False)
+            self._rename_button.setEnabled(False)
+            self._delete_button.setEnabled(False)
+            self._pin_set = False
+            self._status_label.setText("FIDO2 requires the HID interface, but Windows only exposed CCID")
+            if can_restart_as_admin():
+                self._set_transport_hint(
+                    "Windows exposed only the smartcard (CCID) interface for this token. "
+                    "Try restarting the GUI as Administrator so the FIDO2 HID interface "
+                    "can be enumerated as well.",
+                    show_restart=True,
+                )
+            elif is_windows_admin():
+                self._set_transport_hint(
+                    "The GUI is already running as Administrator, but Windows still did not "
+                    "expose the SoloKeys FIDO2 HID interface. FIDO2 PIN and credential "
+                    "management will stay unavailable until the HID interface appears.",
+                    show_restart=False,
+                )
+            else:
+                self._set_transport_hint(
+                    "FIDO2 needs the CTAP HID interface, but only CCID is currently visible.",
+                    show_restart=False,
+                )
+            return
+
+        self._set_transport_hint()
 
         # Update PIN status display
         if pin_set:

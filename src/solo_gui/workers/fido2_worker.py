@@ -59,12 +59,21 @@ class Fido2Worker(QObject):
                 return
             
             if result:
+                ctap2_available = result.get('ctap2_available', True)
                 status = {
+                    'ctap2_available': ctap2_available,
                     'pin_set': result.get('options', {}).get('clientPin', False),
                     'pin_retries': None,
                     'uv_set': result.get('options', {}).get('uv', False),
-                    'cred_mgmt_supported': result.get('options', {}).get('credMgmt', False),
+                    'cred_mgmt_supported': bool(
+                        result.get('options', {}).get('credMgmt', False)
+                        or result.get('options', {}).get('credentialMgmtPreview', False)
+                    ),
                 }
+
+                if not ctap2_available:
+                    self.pin_status_updated.emit(status)
+                    return
                 
                 # Get PIN retries separately if PIN is set
                 if status['pin_set']:

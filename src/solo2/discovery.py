@@ -15,32 +15,10 @@ from .pcsc import list_pcsc_descriptors, should_prefer_ccid
 _log = logging.getLogger("solo2device")
 
 
-def list_regular_descriptors() -> List[Solo2Descriptor]:
-    """Discover regular-mode Solo 2 devices and return stable descriptors."""
+def _list_hid_regular_descriptors() -> List[Solo2Descriptor]:
+    """Discover regular-mode Solo 2 devices via HID."""
     descriptors: List[Solo2Descriptor] = []
     seen_ids = set()
-    if should_prefer_ccid():
-        try:
-            for pcsc_desc in list_pcsc_descriptors():
-                candidate = Solo2Device(
-                    Solo2Descriptor(
-                        id=f"ccid:{pcsc_desc.reader}",
-                        mode=DeviceMode.REGULAR,
-                        path=f"ccid:{pcsc_desc.reader}",
-                        transport="ccid",
-                        reader_name=pcsc_desc.reader,
-                    )
-                )
-                if candidate.connect():
-                    if candidate.path in seen_ids:
-                        continue
-                    descriptors.append(candidate.descriptor)
-                    seen_ids.add(candidate.path)
-                    candidate.disconnect()
-        except Exception as exc:
-            _log.debug("list_regular_descriptors pcsc failed: %s", exc)
-        if descriptors:
-            return descriptors
 
     try:
         for hid_dev in list_ctap_hid_devices():
@@ -63,8 +41,49 @@ def list_regular_descriptors() -> List[Solo2Descriptor]:
                 seen_ids.add(candidate.path)
                 candidate.disconnect()
     except Exception as exc:
-        _log.debug("list_regular_descriptors failed: %s", exc)
+        _log.debug("_list_hid_regular_descriptors failed: %s", exc)
     return descriptors
+
+
+def _list_ccid_regular_descriptors() -> List[Solo2Descriptor]:
+    """Discover regular-mode Solo 2 devices via PC/SC."""
+    descriptors: List[Solo2Descriptor] = []
+    seen_ids = set()
+    try:
+        for pcsc_desc in list_pcsc_descriptors():
+            candidate = Solo2Device(
+                Solo2Descriptor(
+                    id=f"ccid:{pcsc_desc.reader}",
+                    mode=DeviceMode.REGULAR,
+                    path=f"ccid:{pcsc_desc.reader}",
+                    transport="ccid",
+                    reader_name=pcsc_desc.reader,
+                )
+            )
+            if candidate.connect():
+                if candidate.path in seen_ids:
+                    continue
+                descriptors.append(candidate.descriptor)
+                seen_ids.add(candidate.path)
+                candidate.disconnect()
+    except Exception as exc:
+        _log.debug("_list_ccid_regular_descriptors failed: %s", exc)
+    return descriptors
+
+
+def list_regular_descriptors() -> List[Solo2Descriptor]:
+    """Discover regular-mode Solo 2 devices and return stable descriptors."""
+    hid_descriptors = _list_hid_regular_descriptors()
+    if hid_descriptors:
+        # On Windows, probing CCID during background discovery can cause the
+        # SmartCard stack to flap and make the GUI think the token vanished.
+        # Prefer HID for presence detection and keep PC/SC for the applet tabs.
+        return hid_descriptors
+
+    if should_prefer_ccid():
+        return _list_ccid_regular_descriptors()
+
+    return hid_descriptors
 
 
 def list_bootloader_descriptors() -> List[Solo2Descriptor]:

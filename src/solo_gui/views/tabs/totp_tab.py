@@ -696,7 +696,7 @@ class TotpTab(QWidget):
         self._setup_worker()
         self._tools_tab.set_device(device)
         self._set_controls_enabled(True)
-        self.totp_available.emit(self._should_show_tab())
+        self.totp_available.emit(False)
         self._check_status()
 
     def clear_device(self) -> None:
@@ -1003,7 +1003,7 @@ class TotpTab(QWidget):
         """Handle status check result."""
         self._set_busy(False)
         self._status = status
-        self.totp_available.emit(self._should_show_tab())
+        self.totp_available.emit(status.supported and self._should_show_tab())
 
         if status.supported:
             self._status_label.setText(
@@ -1059,6 +1059,11 @@ class TotpTab(QWidget):
         self._credential_cards.clear()
 
         self._credentials = credentials
+        if self._status and self._status.supported:
+            self._status.credentials_count = len(credentials)
+            self._status_label.setText(
+                f"Secrets App v{self._status.version} - {len(credentials)}/{self._status.max_credentials} credentials"
+            )
         self._rebuild_cards()
 
     def _on_credential_added(self, success: bool, error: str) -> None:
