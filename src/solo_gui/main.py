@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QTimer, Qt
 from solo_gui import __version__
+from solo_gui.logging_utils import setup_logging
 from solo_gui.views.main_window import MainWindow
 from solo_gui.browser_server import BrowserServer
 from solo_gui import native_host_installer
@@ -114,6 +115,8 @@ def _get_icon_path() -> Path:
 
 def main() -> None:
     """Main entry point for the application."""
+    log_path = setup_logging()
+
     app = QApplication(sys.argv)
     app.setApplicationName("SoloKeys GUI")
     app.setApplicationVersion(__version__)
@@ -140,6 +143,10 @@ def main() -> None:
     # Silently register the native messaging host on first run (or if stale).
     if not native_host_installer.is_registered():
         QTimer.singleShot(500, _auto_register_host)
+
+    import logging
+
+    logging.getLogger("solo2device").info("Application startup complete, log=%s", log_path)
 
     return app.exec()
 
