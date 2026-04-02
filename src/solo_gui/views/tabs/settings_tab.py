@@ -16,17 +16,19 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QTabWidget,
 )
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import QThread
 
 from solo_gui.models.device import SoloDevice, format_firmware_full
 from solo_gui.workers.admin_worker import AdminWorker, DeviceDiagnostics
+from solo_gui import native_host_installer
 
 
 class SettingsTab(QWidget):
     """Settings tab — device diagnostics and application preferences."""
 
-    def __init__(self):
+    def __init__(self, browser_server=None):
         super().__init__()
+        self._browser_server = browser_server
         self._device: Optional[SoloDevice] = None
         self._admin_worker: Optional[AdminWorker] = None
         self._worker_thread: Optional[QThread] = None
@@ -41,6 +43,7 @@ class SettingsTab(QWidget):
 
         self._settings_tabs.addTab(self._create_diagnostics_tab(), "Diagnostics")
         self._settings_tabs.addTab(self._create_app_settings_tab(), "Application")
+        self._settings_tabs.addTab(self._create_browser_tab(), "Browser")
 
         layout.addWidget(self._settings_tabs)
 
@@ -147,6 +150,101 @@ class SettingsTab(QWidget):
         layout.addStretch()
         return widget
 
+    def _create_browser_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # --- Group: Native Messaging Host ---
+        host_group = QGroupBox("Native Messaging Host")
+        host_layout = QVBoxLayout(host_group)
+
+        host_info = QLabel(
+            "The native messaging host allows the Chrome extension to access your SoloKeys "
+            "directly via HID — no need for this application to be running. "
+            "It must be registered once per user account."
+        )
+        host_info.setWordWrap(True)
+        host_layout.addWidget(host_info)
+
+        status_row = QHBoxLayout()
+        self._host_status_label = QLabel()
+        status_row.addWidget(self._host_status_label)
+        status_row.addStretch()
+        host_layout.addLayout(status_row)
+
+        btn_row = QHBoxLayout()
+        self._register_btn = QPushButton("Register with Chrome/Chromium")
+        self._register_btn.clicked.connect(self._on_register_host)
+        btn_row.addWidget(self._register_btn)
+
+        self._unregister_btn = QPushButton("Unregister")
+        self._unregister_btn.clicked.connect(self._on_unregister_host)
+        btn_row.addWidget(self._unregister_btn)
+        btn_row.addStretch()
+        host_layout.addLayout(btn_row)
+
+        layout.addWidget(host_group)
+
+        # --- Group: Browser Extension Installation ---
+        install_group = QGroupBox("Browser Extension")
+        install_layout = QVBoxLayout(install_group)
+
+        install_info = QLabel(
+            "To use SoloKeys with your browser, install the official extension from the Chrome Web Store."
+        )
+        install_info.setWordWrap(True)
+        install_layout.addWidget(install_info)
+
+        store_link = QLabel(
+            '<a href="https://chrome.google.com/webstore/detail/solokeys-totp/PLACEHOLDER_ID">'
+            'Install from Chrome Web Store</a>'
+        )
+        store_link.setOpenExternalLinks(True)
+        store_link.setStyleSheet("color: #2196F3; font-weight: bold;")
+        install_layout.addWidget(store_link)
+
+        layout.addWidget(install_group)
+        layout.addStretch()
+
+        self._refresh_host_status()
+
+        return widget
+
+    def _refresh_host_status(self) -> None:
+        registered = native_host_installer.is_registered()
+        if registered:
+            self._host_status_label.setText("✓ Registered")
+            self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._register_btn.setText("Re-register")
+        else:
+            self._host_status_label.setText("✗ Not registered")
+            self._host_status_label.setStyleSheet("color: red; font-weight: bold;")
+            self._register_btn.setText("Register with Chrome/Chromium")
+
+    def _on_register_host(self) -> None:
+        success, msg = native_host_installer.install()
+        if success:
+            QMessageBox.information(self, "Native Host Registered", msg)
+        else:
+            QMessageBox.warning(self, "Registration Failed", msg)
+        self._refresh_host_status()
+
+    def _on_unregister_host(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Unregister Native Host",
+            "Remove the native messaging host registration?\n"
+            "The browser extension will no longer be able to connect.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        success, msg = native_host_installer.uninstall()
+        if success:
+            QMessageBox.information(self, "Unregistered", msg)
+        else:
+            QMessageBox.warning(self, "Unregistration Failed", msg)
+        self._refresh_host_status()
+
     # -------------------------------------------------------------------------
 
     def set_device(self, device: SoloDevice) -> None:
@@ -242,3 +340,5 @@ class SettingsTab(QWidget):
             )
         else:
             self._ctap2_options_text.setPlainText("(none)")
+
+    # Autostart methods

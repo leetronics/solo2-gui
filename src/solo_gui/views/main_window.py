@@ -1,5 +1,9 @@
 """Main window for SoloKeys GUI."""
 
+import os
+import sys
+import configparser
+from pathlib import Path
 from typing import Optional, Dict
 
 from PySide6.QtWidgets import (
@@ -13,20 +17,21 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QStackedWidget,
     QFrame,
-    QSizePolicy,
-    QStyle,
+    QApplication,
 )
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, QThread, QMetaObject, QEvent
 from PySide6.QtGui import QIcon, QAction
 
-# Try to import standard icons, fallback to text-only if not available
+# Try to import QtAwesome for better icons, fallback to QStyle if not available
 try:
-    from PySide6.QtGui import QIcon
-    HAS_ICONS = True
+    import qtawesome as qta
+    HAS_QTAWESOME = True
 except ImportError:
-    HAS_ICONS = False
+    HAS_QTAWESOME = False
+    from PySide6.QtWidgets import QStyle
 
 from ..models.device import SoloDevice, format_firmware_version
+from ..workers.update_worker import UpdateCheckWorker
 from ..models.device_monitor import DeviceMonitor
 from ..device_manager import DeviceManager
 from .tabs.overview_tab import OverviewTab
@@ -36,12 +41,149 @@ from .tabs.totp_tab import TotpTab
 from .tabs.admin_tab import AdminTab
 from .tabs.hacker_tab import HackerTab
 from .tabs.settings_tab import SettingsTab
+from .tabs.gpg_tab import GpgTab
+
+_ICON_RESOURCES_DIR = (
+    __file__
+    and __import__('pathlib').Path(__file__).parent.parent / "resources"
+)
+
+
+def _is_dark_mode() -> bool:
+    force_mode = os.environ.get("SOLOKEYSGUI_THEME", "").lower()
+    if force_mode == "dark":
+        return True
+    if force_mode == "light":
+        return False
+
+    color_scheme = QApplication.styleHints().colorScheme()
+    if color_scheme == Qt.ColorScheme.Dark:
+        return True
+
+
+def _get_sidebar_colors() -> dict:
+    """Get color scheme for sidebar based on dark/light mode."""
+    if _is_dark_mode():
+        return {
+            'bg': '#2d2d2d',
+            'border': '#444',
+            'btn_bg': '#3d3d3d',
+            'btn_hover': '#4d4d4d',
+            'btn_text': '#e0e0e0',
+            'btn_checked_bg': '#2196F3',
+            'btn_checked_text': 'white',
+            'btn_disabled_bg': '#333',
+            'btn_disabled_text': '#777',
+        }
+    else:
+        return {
+            'bg': '#fafafa',
+            'border': '#ddd',
+            'btn_bg': '#f5f5f5',
+            'btn_hover': '#e0e0e0',
+            'btn_text': '#333',
+            'btn_checked_bg': '#2196F3',
+            'btn_checked_text': 'white',
+            'btn_disabled_bg': '#e0e0e0',
+            'btn_disabled_text': '#999',
+        }
+    if color_scheme == Qt.ColorScheme.Light:
+        return False
+
+    gtk_theme = os.environ.get("GTK_THEME", "").lower()
+    if "dark" in gtk_theme:
+        return True
+
+    gtk_settings = Path.home() / ".config" / "gtk-3.0" / "settings.ini"
+    if gtk_settings.exists():
+        parser = configparser.ConfigParser()
+        parser.read(gtk_settings)
+        if parser.has_option("Settings", "gtk-theme-name"):
+            theme = parser.get("Settings", "gtk-theme-name").lower()
+            if "dark" in theme:
+                return True
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "gtk-theme"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            theme = result.stdout.strip().lower()
+            if "dark" in theme:
+                return True
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["xfconf-query", "-c", "xsettings", "-p", "/Net/ThemeName"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            theme = result.stdout.strip().lower()
+            if "dark" in theme:
+                return True
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["xfconf-query", "-c", "xfwm4", "-p", "/general/theme"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            theme = result.stdout.strip().lower()
+            if "dark" in theme:
+                return True
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["xfconf-query", "-c", "xfce4-panel", "-p", "/panels/panel-1/background-style"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0 and "0" not in result.stdout:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _get_icon_path() -> "Path":
+    if sys.platform == "win32":
+        if _is_dark_mode():
+            return _ICON_RESOURCES_DIR / "icon-dark.ico"
+        return _ICON_RESOURCES_DIR / "icon-light.ico"
+    if _is_dark_mode():
+        return _ICON_RESOURCES_DIR / "logo-dark.png"
+    else:
+        return _ICON_RESOURCES_DIR / "logo-light.png"
+
+
+# Icon mapping for sidebar buttons using Material Design Icons
+SIDEBAR_ICONS = {
+    'overview': 'fa5s.home',
+    'fido2': 'fa5s.key',
+    'totp': 'fa5s.clock',
+    'piv': 'fa5s.id-card',
+    'gpg': 'fa5s.lock',
+    'hacker': 'fa5s.bug',
+    'admin': 'fa5s.shield-alt',
+    'settings': 'fa5s.cog',
+}
 
 
 class SidebarButton(QPushButton):
     """Custom button for sidebar navigation."""
     
-    def __init__(self, text: str, icon_name: str = None, parent=None):
+    def __init__(self, text: str, icon_key: str = None, parent=None):
         super().__init__(parent)
         self.setText(text)
         self.setCheckable(True)
@@ -50,59 +192,74 @@ class SidebarButton(QPushButton):
         self.setMinimumWidth(160)
         self.setMaximumWidth(160)
         
-        # Set icon if available
-        if HAS_ICONS and icon_name and parent:
+        # Set icon using QtAwesome (Material Design Icons) when available
+        if HAS_QTAWESOME and icon_key:
+            try:
+                icon = qta.icon(SIDEBAR_ICONS.get(icon_key, 'fa5s.circle'), 
+                               color='black',
+                               color_active='white')
+                self.setIcon(icon)
+                self.setIconSize(QSize(22, 22))
+            except Exception:
+                # Fallback to no icon if qtawesome fails
+                pass
+        elif parent:
+            # Fallback to basic QStyle icons
             style = parent.style()
-            icon = style.standardIcon(getattr(QStyle, icon_name, QStyle.SP_ComputerIcon))
+            icon = style.standardIcon(QStyle.SP_ComputerIcon)
             self.setIcon(icon)
-            self.setIconSize(QSize(24, 24))
+            self.setIconSize(QSize(22, 22))
         
-        # Style
-        self.setStyleSheet("""
-            QPushButton {
+        # Style with dark mode support
+        colors = _get_sidebar_colors()
+        self.setStyleSheet(f"""
+            QPushButton {{
                 text-align: left;
                 padding: 8px 12px;
                 margin: 2px 4px;
                 border: none;
                 border-radius: 6px;
-                background-color: #f5f5f5;
-                color: #333;
+                background-color: {colors['btn_bg']};
+                color: {colors['btn_text']};
                 font-weight: normal;
-            }
-            QPushButton:hover {
-                background-color: #e0e0e0;
-            }
-            QPushButton:checked {
-                background-color: #2196F3;
-                color: white;
+            }}
+            QPushButton:hover {{
+                background-color: {colors['btn_hover']};
+            }}
+            QPushButton:checked {{
+                background-color: {colors['btn_checked_bg']};
+                color: {colors['btn_checked_text']};
                 font-weight: bold;
-            }
-            QPushButton:disabled {
-                background-color: #e0e0e0;
-                color: #999;
-            }
+            }}
+            QPushButton:disabled {{
+                background-color: {colors['btn_disabled_bg']};
+                color: {colors['btn_disabled_text']};
+            }}
         """)
 
 
 class MainWindow(QMainWindow):
     """Main application window."""
 
-    def __init__(self):
+    def __init__(self, browser_server=None):
         super().__init__()
+        self._browser_server = browser_server
         # DeviceMonitor handles device detection/plugging
         self._device_monitor = DeviceMonitor()
         # DeviceManager (singleton) handles all device operations
         self._device_manager = DeviceManager.get_instance()
         self._current_device: Optional[SoloDevice] = None
         self._refresh_timer = QTimer()
-        
-        # Track sidebar buttons and their corresponding tabs
-        self._sidebar_buttons: Dict[int, SidebarButton] = {}
-        self._tab_indices: Dict[str, int] = {}
-        
+
+        # widget → sidebar button mapping (populated in _setup_tabs)
+        self._tab_buttons: Dict[object, SidebarButton] = {}
+
         self._setup_ui()
         self._setup_connections()
         self._setup_menu()
+
+        # Select first tab now that _setup_tabs has run
+        self._select_tab(self._overview_tab)
 
         # Start device monitoring
         self._device_monitor.start_monitoring()
@@ -112,9 +269,24 @@ class MainWindow(QMainWindow):
         self._device_manager.device_disconnected.connect(self._on_dm_disconnected)
         self._device_manager.error_occurred.connect(self._on_dm_error)
 
+        # Update checker
+        self._manual_update_check = False
+        self._update_thread = QThread(self)
+        self._update_worker = UpdateCheckWorker()
+        self._update_worker.moveToThread(self._update_thread)
+        self._update_worker.update_checked.connect(self._on_update_checked)
+        self._update_thread.start()
+        QTimer.singleShot(3000, self._check_for_updates)
+
+        # Clean up properly when the application actually quits
+        QApplication.instance().aboutToQuit.connect(self._quit_app)
+
+    def event(self, event) -> bool:
+        return super().event(event)
+
     def _setup_ui(self) -> None:
         self.setWindowTitle("SoloKeys GUI")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(900, 600)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -132,6 +304,25 @@ class MainWindow(QMainWindow):
         device_layout.addStretch()
         main_layout.addLayout(device_layout)
 
+        # Update banner (hidden by default)
+        self._update_banner = QWidget()
+        self._update_banner.setVisible(False)
+        self._update_banner.setStyleSheet(
+            "background:#1565C0; color:white; padding:4px 10px;"
+        )
+        banner_layout = QHBoxLayout(self._update_banner)
+        banner_layout.setContentsMargins(0, 0, 0, 0)
+        self._update_label = QLabel()
+        self._update_label.setOpenExternalLinks(True)
+        self._update_label.setStyleSheet("color:white;")
+        dismiss_btn = QPushButton("✕")
+        dismiss_btn.setFlat(True)
+        dismiss_btn.setStyleSheet("color:white; font-weight:bold;")
+        dismiss_btn.clicked.connect(lambda: self._update_banner.setVisible(False))
+        banner_layout.addWidget(self._update_label, 1)
+        banner_layout.addWidget(dismiss_btn)
+        main_layout.addWidget(self._update_banner)
+
         # Main content area with sidebar and stacked widget
         content_layout = QHBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -142,29 +333,31 @@ class MainWindow(QMainWindow):
         self._sidebar.setFrameShape(QFrame.Shape.StyledPanel)
         self._sidebar.setMaximumWidth(180)
         self._sidebar.setMinimumWidth(180)
-        self._sidebar.setStyleSheet("background-color: #fafafa; border-right: 1px solid #ddd;")
+        sidebar_colors = _get_sidebar_colors()
+        self._sidebar.setStyleSheet(f"background-color: {sidebar_colors['bg']}; border-right: 1px solid {sidebar_colors['border']};")
         
         sidebar_layout = QVBoxLayout(self._sidebar)
         sidebar_layout.setContentsMargins(5, 10, 5, 10)
         sidebar_layout.setSpacing(4)
         sidebar_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
-        # Create sidebar buttons
-        self._overview_btn = SidebarButton("Overview", "SP_ComputerIcon", self)
-        self._fido2_btn = SidebarButton("FIDO2", "SP_DialogApplyButton", self)
-        self._admin_btn = SidebarButton("Admin", "SP_TitleBarMenuButton", self)
-        self._settings_btn = SidebarButton("Settings", "SP_ComputerIcon", self)
+        # Create sidebar buttons with Material Design Icons
+        self._overview_btn = SidebarButton("Overview", "overview", self)
+        self._fido2_btn = SidebarButton("FIDO2", "fido2", self)
+        self._admin_btn = SidebarButton("Admin", "admin", self)
+        self._settings_btn = SidebarButton("Settings", "settings", self)
         
         # Dynamic buttons (will be shown/hidden)
-        self._piv_btn = SidebarButton("PIV", "SP_FileIcon", self)
-        self._totp_btn = SidebarButton("TOTP", "SP_DialogApplyButton", self)
-        self._hacker_btn = SidebarButton("Hacker", "SP_MessageBoxWarning", self)
+        self._piv_btn = SidebarButton("PIV", "piv", self)
+        self._gpg_btn = SidebarButton("OpenPGP", "gpg", self)
+        self._totp_btn = SidebarButton("Secrets", "totp", self)
+        self._hacker_btn = SidebarButton("Hacker", "hacker", self)
         
         # Add static buttons to sidebar
         sidebar_layout.addWidget(self._overview_btn)
         sidebar_layout.addWidget(self._fido2_btn)
         
-        # Container for dynamic buttons (PIV, TOTP, Hacker)
+        # Container for dynamic buttons (PIV, OpenPGP, Secrets, Hacker)
         self._dynamic_buttons_container = QWidget()
         self._dynamic_buttons_layout = QVBoxLayout(self._dynamic_buttons_container)
         self._dynamic_buttons_layout.setContentsMargins(0, 0, 0, 0)
@@ -191,117 +384,72 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Ready")
         
-        # Select first tab by default
-        self._select_tab(0)
+        # Select first tab by default (tabs set up in _setup_tabs, called next)
+        # Deferred to after _setup_tabs via _setup_connections → done at end of __init__
 
     def _setup_tabs(self) -> None:
-        """Setup tabs and link them to sidebar buttons."""
+        """Setup tabs and link them to sidebar buttons.
+
+        All tabs are added to the stacked widget once at startup in a fixed
+        order.  Dynamic tabs (PIV, Secrets, Hacker) are always present but their
+        sidebar buttons are hidden until the device reports them as available.
+        Navigation uses setCurrentWidget() so indices never matter.
+        """
         self._overview_tab = OverviewTab()
         self._fido2_tab = Fido2Tab()
         self._piv_tab = PivTab()
+        self._gpg_tab = GpgTab()
         self._totp_tab = TotpTab()
-        self._admin_tab = AdminTab()
         self._hacker_tab = HackerTab()
-        self._settings_tab = SettingsTab()
+        self._admin_tab = AdminTab()
+        self._settings_tab = SettingsTab(browser_server=self._browser_server)
 
-        # Add static tabs
-        idx = self._stacked_widget.addWidget(self._overview_tab)
-        self._tab_indices['overview'] = idx
-        self._sidebar_buttons[idx] = self._overview_btn
-        self._overview_btn.clicked.connect(lambda checked, i=idx: self._select_tab(i))
-        
-        idx = self._stacked_widget.addWidget(self._fido2_tab)
-        self._tab_indices['fido2'] = idx
-        self._sidebar_buttons[idx] = self._fido2_btn
-        self._fido2_btn.clicked.connect(lambda checked, i=idx: self._select_tab(i))
-        
-        idx = self._stacked_widget.addWidget(self._admin_tab)
-        self._tab_indices['admin'] = idx
-        self._sidebar_buttons[idx] = self._admin_btn
-        self._admin_btn.clicked.connect(lambda checked, i=idx: self._select_tab(i))
-        
-        idx = self._stacked_widget.addWidget(self._settings_tab)
-        self._tab_indices['settings'] = idx
-        self._sidebar_buttons[idx] = self._settings_btn
-        self._settings_btn.clicked.connect(lambda checked, i=idx: self._select_tab(i))
+        # Add every tab once — order determines visual stacking, not navigation
+        for tab in (
+            self._overview_tab,
+            self._fido2_tab,
+            self._piv_tab,
+            self._gpg_tab,
+            self._totp_tab,
+            self._hacker_tab,
+            self._admin_tab,
+            self._settings_tab,
+        ):
+            self._stacked_widget.addWidget(tab)
 
-        # Dynamic tabs (hidden by default)
-        self._piv_tab_idx = -1
-        self._totp_tab_idx = -1
-        self._hacker_tab_idx = -1
+        # widget → button mapping used by _select_tab and _set_tabs_enabled
+        self._tab_buttons = {
+            self._overview_tab: self._overview_btn,
+            self._fido2_tab:    self._fido2_btn,
+            self._piv_tab:      self._piv_btn,
+            self._gpg_tab:      self._gpg_btn,
+            self._totp_tab:     self._totp_btn,
+            self._hacker_tab:   self._hacker_btn,
+            self._admin_tab:    self._admin_btn,
+            self._settings_tab: self._settings_btn,
+        }
+
+        # Connect every button — captures widget reference, not index
+        for tab, btn in self._tab_buttons.items():
+            btn.clicked.connect(lambda checked, t=tab: self._select_tab(t))
+
+        # Dynamic buttons live in the container but start hidden
+        for btn in (
+            self._piv_btn,
+            self._gpg_btn,
+            self._totp_btn,
+            self._hacker_btn,
+        ):
+            self._dynamic_buttons_layout.addWidget(btn)
+            btn.setVisible(False)
 
         self._set_tabs_enabled(False)
 
-    def _select_tab(self, index: int) -> None:
-        """Select a tab by index."""
-        if 0 <= index < self._stacked_widget.count():
-            self._stacked_widget.setCurrentIndex(index)
-            # Update button states
-            for idx, btn in self._sidebar_buttons.items():
-                btn.setChecked(idx == index)
-
-    def _add_dynamic_tab(self, widget, button: SidebarButton, name: str) -> int:
-        """Add a dynamic tab with its sidebar button."""
-        # Find position to insert (before Admin)
-        admin_idx = self._tab_indices.get('admin', self._stacked_widget.count())
-        
-        # Insert into stacked widget
-        idx = admin_idx
-        self._stacked_widget.insertWidget(idx, widget)
-        
-        # Update indices for tabs after insertion point
-        for key, old_idx in list(self._tab_indices.items()):
-            if old_idx >= admin_idx:
-                self._tab_indices[key] = old_idx + 1
-                if old_idx in self._sidebar_buttons:
-                    self._sidebar_buttons[old_idx + 1] = self._sidebar_buttons.pop(old_idx)
-        
-        # Update dynamic tab indices
-        if self._piv_tab_idx >= admin_idx:
-            self._piv_tab_idx += 1
-        if self._totp_tab_idx >= admin_idx:
-            self._totp_tab_idx += 1
-        if self._hacker_tab_idx >= admin_idx:
-            self._hacker_tab_idx += 1
-        
-        self._tab_indices[name] = idx
-        self._sidebar_buttons[idx] = button
-        button.clicked.connect(lambda checked, i=idx: self._select_tab(i))
-        
-        # Add button to dynamic buttons container
-        self._dynamic_buttons_layout.addWidget(button)
-        button.show()
-        
-        return idx
-
-    def _remove_dynamic_tab(self, name: str, button: SidebarButton, idx: int) -> None:
-        """Remove a dynamic tab and its sidebar button."""
-        if idx < 0:
-            return
-            
-        # Remove widget from stacked widget
-        widget = self._stacked_widget.widget(idx)
-        self._stacked_widget.removeWidget(widget)
-        
-        # Remove button from sidebar
-        button.hide()
-        button.setParent(None)
-        
-        # Clean up connections
-        button.clicked.disconnect()
-        
-        # Remove from tracking
-        if idx in self._sidebar_buttons:
-            del self._sidebar_buttons[idx]
-        if name in self._tab_indices:
-            del self._tab_indices[name]
-        
-        # Update indices for tabs after removal
-        for key, old_idx in list(self._tab_indices.items()):
-            if old_idx > idx:
-                self._tab_indices[key] = old_idx - 1
-                if old_idx in self._sidebar_buttons:
-                    self._sidebar_buttons[old_idx - 1] = self._sidebar_buttons.pop(old_idx)
+    def _select_tab(self, tab: QWidget) -> None:
+        """Show a tab and mark its sidebar button as active."""
+        self._stacked_widget.setCurrentWidget(tab)
+        for t, btn in self._tab_buttons.items():
+            btn.setChecked(t is tab)
 
     def _setup_connections(self) -> None:
         self._device_monitor.device_connected.connect(self._on_device_connected)
@@ -309,6 +457,7 @@ class MainWindow(QMainWindow):
         self._device_monitor.device_error.connect(self._on_device_monitor_error)
         self._refresh_button.clicked.connect(self._refresh_devices)
         self._piv_tab.piv_availability.connect(self._on_piv_availability)
+        self._gpg_tab.gpg_availability.connect(self._on_gpg_availability)
         self._totp_tab.totp_available.connect(self._on_totp_availability)
 
     def _setup_menu(self) -> None:
@@ -326,6 +475,10 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu("Help")
         about_action = QAction("About", self)
         about_action.triggered.connect(self._show_about)
+        check_update_action = QAction("Check for Updates", self)
+        check_update_action.triggered.connect(self._manual_check_for_updates)
+        help_menu.addAction(check_update_action)
+        help_menu.addSeparator()
         help_menu.addAction(about_action)
 
     # -------------------------------------------------------------------------
@@ -336,6 +489,7 @@ class MainWindow(QMainWindow):
             self._overview_tab.clear_device()
             self._fido2_tab.clear_device()
             self._piv_tab.clear_device()
+            self._gpg_tab.clear_device()
             self._totp_tab.clear_device()
             self._admin_tab.clear_device()
             self._hacker_tab.clear_device()
@@ -343,11 +497,10 @@ class MainWindow(QMainWindow):
 
         self._current_device = device
 
-        # Start DeviceManager with the device path
-        if device.hid_device_path:
-            self._device_manager.start(device.hid_device_path)
-
         info = device.get_info()
+        if info.mode.value == "regular":
+            self._device_manager.start(device)
+
         product = info.serial_number or "Solo 2"
         in_bootloader = info.mode.value == "bootloader"
         suffix = " (Bootloader)" if in_bootloader else ""
@@ -359,6 +512,7 @@ class MainWindow(QMainWindow):
         self._overview_tab.set_device(device)
         self._fido2_tab.set_device(device)
         self._piv_tab.set_device(device)
+        self._gpg_tab.set_device(device)
         self._totp_tab.set_device(device)
         self._admin_tab.set_device(device)
         self._hacker_tab.set_device(device)
@@ -384,27 +538,23 @@ class MainWindow(QMainWindow):
         self._overview_tab.clear_device()
         self._fido2_tab.clear_device()
         self._piv_tab.clear_device()
+        self._gpg_tab.clear_device()
         self._totp_tab.clear_device()
         self._admin_tab.clear_device()
         self._hacker_tab.clear_device()
         self._settings_tab.clear_device()
 
-        # Hide dynamic tabs when device disconnects
-        if self._piv_tab_idx != -1:
-            self._remove_dynamic_tab('piv', self._piv_btn, self._piv_tab_idx)
-            self._piv_tab_idx = -1
-        if self._totp_tab_idx != -1:
-            self._remove_dynamic_tab('totp', self._totp_btn, self._totp_tab_idx)
-            self._totp_tab_idx = -1
-        if self._hacker_tab_idx != -1:
-            self._remove_dynamic_tab('hacker', self._hacker_btn, self._hacker_tab_idx)
-            self._hacker_tab_idx = -1
+        # Hide dynamic tab buttons
+        self._piv_btn.setVisible(False)
+        self._gpg_btn.setVisible(False)
+        self._totp_btn.setVisible(False)
+        self._hacker_btn.setVisible(False)
 
         # Stop DeviceManager
         self._device_manager.stop()
-        
-        # Select overview tab
-        self._select_tab(0)
+
+        # Return to overview
+        self._select_tab(self._overview_tab)
 
     def _on_tab_changed(self, index: int) -> None:
         if self._current_device is None:
@@ -424,52 +574,34 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage(f"Device error: {error}")
 
     def _on_piv_availability(self, available: bool) -> None:
-        """Show or hide PIV tab based on availability."""
-        print(f"[MainWindow] PIV availability: {available}, current idx: {self._piv_tab_idx}")
-        if available and self._piv_tab_idx == -1:
-            self._piv_tab_idx = self._add_dynamic_tab(self._piv_tab, self._piv_btn, 'piv')
-            print(f"[MainWindow] Added PIV tab at index {self._piv_tab_idx}")
-            # Enable the button if device is connected
-            self._piv_btn.setEnabled(self._current_device is not None)
-        elif not available and self._piv_tab_idx != -1:
-            self._remove_dynamic_tab('piv', self._piv_btn, self._piv_tab_idx)
-            self._piv_tab_idx = -1
-            print("[MainWindow] Removed PIV tab")
+        self._piv_btn.setVisible(available)
+        self._piv_btn.setEnabled(available and self._current_device is not None)
+
+    def _on_gpg_availability(self, available: bool) -> None:
+        self._gpg_btn.setVisible(available)
+        self._gpg_btn.setEnabled(available and self._current_device is not None)
 
     def _on_totp_availability(self, available: bool) -> None:
-        """Show or hide TOTP tab based on availability."""
-        print(f"[MainWindow] TOTP availability: {available}, current idx: {self._totp_tab_idx}")
-        if available and self._totp_tab_idx == -1:
-            self._totp_tab_idx = self._add_dynamic_tab(self._totp_tab, self._totp_btn, 'totp')
-            print(f"[MainWindow] Added TOTP tab at index {self._totp_tab_idx}")
-            # Enable the button if device is connected
-            self._totp_btn.setEnabled(self._current_device is not None)
-        elif not available and self._totp_tab_idx != -1:
-            self._remove_dynamic_tab('totp', self._totp_btn, self._totp_tab_idx)
-            self._totp_tab_idx = -1
-            print("[MainWindow] Removed TOTP tab")
+        self._totp_btn.setVisible(available)
+        self._totp_btn.setEnabled(available and self._current_device is not None)
 
     def _on_hacker_availability(self, available: bool) -> None:
-        """Show or hide Hacker tab based on availability."""
-        print(f"[MainWindow] Hacker availability: {available}, current idx: {self._hacker_tab_idx}")
-        if available and self._hacker_tab_idx == -1:
-            self._hacker_tab_idx = self._add_dynamic_tab(self._hacker_tab, self._hacker_btn, 'hacker')
-            print(f"[MainWindow] Added Hacker tab at index {self._hacker_tab_idx}")
-            # Enable the button if device is connected
-            self._hacker_btn.setEnabled(self._current_device is not None)
-        elif not available and self._hacker_tab_idx != -1:
-            self._remove_dynamic_tab('hacker', self._hacker_btn, self._hacker_tab_idx)
-            self._hacker_tab_idx = -1
-            print("[MainWindow] Removed Hacker tab")
+        self._hacker_btn.setVisible(available)
+        self._hacker_btn.setEnabled(available and self._current_device is not None)
 
     def _set_tabs_enabled(self, enabled: bool) -> None:
-        """Enable/disable all sidebar buttons."""
-        for btn in self._sidebar_buttons.values():
-            btn.setEnabled(enabled)
-        # Dynamic buttons
-        self._piv_btn.setEnabled(enabled and self._piv_tab_idx != -1)
-        self._totp_btn.setEnabled(enabled and self._totp_tab_idx != -1)
-        self._hacker_btn.setEnabled(enabled and self._hacker_tab_idx != -1)
+        """Enable/disable sidebar buttons. Dynamic buttons only enabled when visible."""
+        dynamic_btns = (
+            self._piv_btn,
+            self._gpg_btn,
+            self._totp_btn,
+            self._hacker_btn,
+        )
+        for tab, btn in self._tab_buttons.items():
+            if btn in dynamic_btns:
+                btn.setEnabled(enabled and btn.isVisible())
+            else:
+                btn.setEnabled(enabled)
 
     # DeviceManager signal handlers
     def _on_dm_connected(self, device_path: str) -> None:
@@ -493,7 +625,31 @@ class MainWindow(QMainWindow):
             "© 2024 SoloKeys GUI Team",
         )
 
-    def closeEvent(self, event) -> None:
+    def _check_for_updates(self) -> None:
+        """Trigger an update check (startup auto-check, silent when up to date)."""
+        QMetaObject.invokeMethod(self._update_worker, "check", Qt.ConnectionType.QueuedConnection)
+
+    def _manual_check_for_updates(self) -> None:
+        """Trigger an update check from the Help menu (shows 'Up to date' feedback)."""
+        self._manual_update_check = True
+        self._status_bar.showMessage("Checking for updates…", 3000)
+        QMetaObject.invokeMethod(self._update_worker, "check", Qt.ConnectionType.QueuedConnection)
+
+    def _on_update_checked(self, tag: str, url: str, is_newer: bool) -> None:
+        manual = self._manual_update_check
+        self._manual_update_check = False
+        if is_newer:
+            self._update_label.setText(
+                f"Update available: <b>{tag}</b> — "
+                f'<a href="{url}" style="color:white;">Download</a>'
+            )
+            self._update_banner.setVisible(True)
+        elif manual:
+            self._status_bar.showMessage("Up to date", 4000)
+
+    def _quit_app(self) -> None:
+        """Clean up and quit."""
+        self._update_thread.quit()
+        self._update_thread.wait()
         self._device_manager.stop()
         self._device_monitor.stop_monitoring()
-        event.accept()

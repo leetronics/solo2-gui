@@ -1,16 +1,18 @@
 @echo off
-:: build_windows.bat — Build SoloKeys GUI for Windows (onedir)
+:: build_windows.bat — Build SoloKeys GUI for Windows installer
 ::
 :: Requirements: Python 3.10+, libusb-1.0.dll
 :: Usage: build_windows.bat
 ::
-:: The resulting distributable is dist\SoloKeys GUI\
-:: Zip that folder and share it; users run "SoloKeys GUI.exe" inside.
+:: The resulting distributable is dist\installer\SoloKeys-GUI-Setup-<version>.exe
 
 setlocal enabledelayedexpansion
 
 set APP_NAME=SoloKeys GUI
 set APP_VERSION=0.1.0
+set APP_DIR=dist\%APP_NAME%
+set HOST_EXE=dist\solokeys-secrets-host.exe
+set INSTALLER_OUTPUT=dist\installer\SoloKeys-GUI-Setup-%APP_VERSION%.exe
 
 echo.
 echo ============================================================
@@ -93,6 +95,45 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo Installing pywin32 for HID proxy service...
+pip install "pywin32>=306"
+if errorlevel 1 (
+    echo Error: pywin32 install failed.
+    exit /b 1
+)
+
+:: ---------------------------------------------------------------------------
+:: 3b. Detect Inno Setup compiler
+:: ---------------------------------------------------------------------------
+set ISCC_CMD=
+for %%I in (iscc.exe) do set ISCC_CMD=%%~$PATH:I
+if defined ISCC_CMD (
+    echo Inno Setup compiler found at %ISCC_CMD%
+    goto :iscc_found
+)
+
+if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
+    set ISCC_CMD=C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+    echo Inno Setup compiler found at %ISCC_CMD%
+    goto :iscc_found
+)
+
+if exist "C:\Program Files\Inno Setup 6\ISCC.exe" (
+    set ISCC_CMD=C:\Program Files\Inno Setup 6\ISCC.exe
+    echo Inno Setup compiler found at %ISCC_CMD%
+    goto :iscc_found
+)
+
+echo Error: Inno Setup Compiler ^(ISCC.exe^) not found.
+echo.
+echo Install Inno Setup 6 from:
+echo   https://jrsoftware.org/isdl.php
+echo.
+echo Or ensure ISCC.exe is available on PATH.
+exit /b 1
+
+:iscc_found
+
 :: ---------------------------------------------------------------------------
 :: 4. Clean previous build artifacts
 :: ---------------------------------------------------------------------------
@@ -102,35 +143,91 @@ if exist build   rmdir /s /q build
 if exist dist    rmdir /s /q dist
 
 :: ---------------------------------------------------------------------------
-:: 5. Run PyInstaller
+:: 5. Run PyInstaller for the GUI
 :: ---------------------------------------------------------------------------
 echo.
-echo Running PyInstaller...
+echo Running PyInstaller for GUI...
 python -m PyInstaller --clean --noconfirm solokeys_gui.spec
 if errorlevel 1 (
-    echo Error: PyInstaller failed.
+    echo Error: PyInstaller GUI build failed.
     exit /b 1
 )
 
-if not exist "dist\%APP_NAME%" (
-    echo Error: PyInstaller did not produce dist\%APP_NAME%\
+if not exist "%APP_DIR%" (
+    echo Error: PyInstaller did not produce %APP_DIR%\
     exit /b 1
 )
 
 :: ---------------------------------------------------------------------------
-:: 6. Summary
+:: 6. Run PyInstaller for the native host helper
+:: ---------------------------------------------------------------------------
+echo.
+echo Running PyInstaller for native host...
+python -m PyInstaller --clean --noconfirm native_host.spec
+if errorlevel 1 (
+    echo Error: PyInstaller native host build failed.
+    exit /b 1
+)
+
+if not exist "%HOST_EXE%" (
+    echo Error: PyInstaller did not produce %HOST_EXE%
+    exit /b 1
+)
+
+copy /y "%HOST_EXE%" "%APP_DIR%\solokeys-secrets-host.exe" >nul
+if errorlevel 1 (
+    echo Error: failed to copy native host into %APP_DIR%\
+    exit /b 1
+)
+
+:: ---------------------------------------------------------------------------
+:: 6b. Run PyInstaller for the HID proxy service
+:: ---------------------------------------------------------------------------
+echo.
+echo Running PyInstaller for HID proxy service...
+python -m PyInstaller --clean --noconfirm solokeys_service.spec
+if errorlevel 1 (
+    echo Error: PyInstaller HID proxy service build failed.
+    exit /b 1
+)
+
+if not exist "dist\solokeys-service.exe" (
+    echo Error: PyInstaller did not produce dist\solokeys-service.exe
+    exit /b 1
+)
+
+:: ---------------------------------------------------------------------------
+:: 7. Build installer
+:: ---------------------------------------------------------------------------
+echo.
+echo Running Inno Setup...
+"%ISCC_CMD%" /Qp /DMyAppVersion=%APP_VERSION% /DMyAppSourceDir="%APP_DIR%" /DMyOutputDir="dist\installer" installer_windows.iss
+if errorlevel 1 (
+    echo Error: Inno Setup build failed.
+    exit /b 1
+)
+
+if not exist "%INSTALLER_OUTPUT%" (
+    echo Error: Installer was not created at %INSTALLER_OUTPUT%
+    exit /b 1
+)
+
+:: ---------------------------------------------------------------------------
+:: 8. Summary
 :: ---------------------------------------------------------------------------
 echo.
 echo ============================================================
-echo  Build complete: dist\%APP_NAME%\
+echo  Build complete: %INSTALLER_OUTPUT%
 echo.
 echo  To distribute:
-echo    1. Zip the folder: dist\%APP_NAME%\
-echo    2. Share the zip — users extract and run "%APP_NAME%.exe"
+echo    Share the installer EXE with users.
+echo.
+echo  Intermediate app payload:
+echo    %APP_DIR%\
 echo.
 echo  Note: Windows SmartScreen may warn on first launch because
-echo  the executable is not code-signed. To suppress this warning,
-echo  sign with an EV code-signing certificate before distribution.
+echo  the installer and app are not code-signed. To suppress this warning,
+echo  sign the installer and bundled binaries before distribution.
 echo ============================================================
 
 endlocal

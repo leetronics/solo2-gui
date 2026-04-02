@@ -51,18 +51,16 @@ class FirmwareUpdateWorker(QObject):
     def __init__(self, device):
         super().__init__()
         self._device = device
-        self._device_path = device.hid_device_path if device else None
         self._bootloader = None
 
     def _open_hid_device(self):
         """Open HID device connection."""
-        if not self._device_path:
-            raise RuntimeError("No device path available")
-        from fido2.hid import CtapHidDevice
-        for hid_dev in CtapHidDevice.list_devices():
-            if hid_dev.descriptor.path == self._device_path:
-                return hid_dev
-        raise RuntimeError("Device not found")
+        if not self._device:
+            raise RuntimeError("No device available")
+        hid_dev = self._device.open_hid_device()
+        if hid_dev is None:
+            raise RuntimeError("Device not found")
+        return hid_dev
 
     def check_for_updates(self, current_version: str) -> None:
         """Check for available firmware updates from GitHub."""
@@ -179,7 +177,7 @@ class FirmwareUpdateWorker(QObject):
         try:
             self.update_progress.emit(50, "Rebooting to bootloader mode...")
 
-            if not self._device_path:
+            if not self._device:
                 self.error_occurred.emit("Device not connected")
                 return False
 

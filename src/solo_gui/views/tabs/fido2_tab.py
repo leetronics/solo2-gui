@@ -126,6 +126,7 @@ class Fido2Tab(QWidget):
         self._worker: Optional[Fido2Worker] = None
         self._worker_thread: Optional[QThread] = None
         self._credentials: List[Fido2Credential] = []  # Store loaded credentials
+        self._pin_set: bool = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -319,9 +320,13 @@ class Fido2Tab(QWidget):
         if not self._worker:
             return
 
-        self._set_busy(True, "Loading credentials...")
+        if not self._pin_set:
+            self._status_label.setText(
+                "Set a PIN first to enable credential management"
+            )
+            return
 
-        # Use worker to load credentials
+        self._set_busy(True, "Loading credentials...")
         self._worker.load_credentials()
 
     def _on_credentials_loaded(self, credentials: List[Fido2Credential]) -> None:
@@ -483,9 +488,10 @@ class Fido2Tab(QWidget):
         self._change_pin_button.setEnabled(pin_set)
         self._set_pin_button.setEnabled(not pin_set)
 
-        # Credential management requires PIN to be set
-        cred_buttons_enabled = pin_set and cred_mgmt
-        self._refresh_button.setEnabled(cred_buttons_enabled)
+        self._pin_set = pin_set
+        # Refresh is enabled whenever the device supports credential management,
+        # regardless of PIN state (no-PIN case is handled in _refresh_credentials).
+        self._refresh_button.setEnabled(cred_mgmt)
         if not cred_mgmt:
             self._status_label.setText("Credential management not supported")
 

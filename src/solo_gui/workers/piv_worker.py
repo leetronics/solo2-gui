@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
 import struct
+import time
+import platform
 
 DEFAULT_MANAGEMENT_KEY = "010203040506070801020304050607080102030405060708"
 
@@ -25,8 +27,10 @@ try:
     from smartcard.util import toHexString, toBytes
 
     PCSC_AVAILABLE = True
-except ImportError:
+    PCSC_IMPORT_ERROR = ""
+except ImportError as e:
     PCSC_AVAILABLE = False
+    PCSC_IMPORT_ERROR = str(e)
 
 
 class PivKeyType(Enum):
@@ -111,6 +115,23 @@ class PivCertificate:
     certificate_der: bytes
 
 
+_KEY_TYPE_LABELS = {
+    PivKeyType.ECC_P256: "ECC P-256",
+    PivKeyType.ECC_P384: "ECC P-384",
+    PivKeyType.RSA_2048: "RSA 2048",
+}
+
+
+@dataclass
+class SlotInfo:
+    """PIV slot state — combined key + certificate info."""
+
+    slot: PivSlot
+    has_key: bool
+    key_type_str: Optional[str]
+    certificate: Optional[PivCertificate]
+
+
 class PivWorker(QObject):
     """Worker thread for PIV operations.
 
@@ -121,7 +142,8 @@ class PivWorker(QObject):
     piv_probed = Signal(bool)   # emitted once at connect time: True = PIV applet found
     keys_loaded = Signal(list)  # list[PivKey]
     certificates_loaded = Signal(list)  # list[PivCertificate]
-    key_generated = Signal(bool, str, bytes)  # success, error message, pubkey DER (or b'')
+    slots_loaded = Signal(list)  # list[SlotInfo], always 4 entries
+    key_generated = Signal(bool, str, bytes, object)  # success, error, pubkey DER, slot (or None)
     key_deleted = Signal(bool, str)  # success, error message
     certificate_imported = Signal(bool, str)  # success, error message
     certificate_exported = Signal(bool, str, bytes)  # success, error/path, cert data
@@ -142,11 +164,26 @@ class PivWorker(QObject):
     def check_pcsc_available(self) -> bool:
         """Check if PCSC is available and emit status."""
         if not PCSC_AVAILABLE:
+            if platform.system() == "Windows":
+                message = (
+                    "PCSC support is not available in the app.\n"
+                    "The Windows Smart Card service may still be running.\n\n"
+                    "Likely causes:\n"
+                    "  - pyscard is missing from the build\n"
+                    "  - a pyscard native module failed to load\n"
+                    "  - the PC/SC runtime is not accessible\n"
+                )
+                if PCSC_IMPORT_ERROR:
+                    message += f"\nImport error: {PCSC_IMPORT_ERROR}"
+            else:
+                message = (
+                    "PCSC not available. Install pyscard and PCSC daemon:\n"
+                    "  sudo apt install pcscd pcsc-tools\n"
+                    "  pip install pyscard"
+                )
             self.pcsc_status.emit(
                 False,
-                "PCSC not available. Install pyscard and PCSC daemon:\n"
-                "  sudo apt install pcscd pcsc-tools\n"
-                "  pip install pyscard",
+                message,
             )
             return False
         return True
@@ -167,11 +204,21 @@ class PivWorker(QObject):
             return False
 
         if not reader_list:
-            self.error_occurred.emit(
-                "No PCSC readers found.\n"
-                "Make sure the device is connected and pcscd is running:\n"
-                "  sudo systemctl start pcscd"
-            )
+            if platform.system() == "Windows":
+                self.error_occurred.emit(
+                    "No PCSC readers found.\n"
+                    "The Smart Card service may be running, but Windows is not exposing a CCID reader for the device.\n\n"
+                    "Check:\n"
+                    "  - the SoloKeys CCID/smartcard interface is present in Device Manager\n"
+                    "  - the Smart Card service is running\n"
+                    "  - the correct smartcard/CCID driver is installed"
+                )
+            else:
+                self.error_occurred.emit(
+                    "No PCSC readers found.\n"
+                    "Make sure the device is connected and pcscd is running:\n"
+                    "  sudo systemctl start pcscd"
+                )
             return False
 
         # SELECT variants to try.  Short 5-byte AID (like ykman uses), 9-byte AID
@@ -305,7 +352,11 @@ class PivWorker(QObject):
 
         apdu = [0x00, ins, p1, p2]
         if data:
-            apdu.append(len(data))
+            if len(data) > 255:
+                # Extended-length Lc (ISO 7816-4): 0x00 + 2-byte length
+                apdu.extend([0x00, (len(data) >> 8) & 0xFF, len(data) & 0xFF])
+            else:
+                apdu.append(len(data))
             apdu.extend(data)
         if le > 0:
             apdu.append(le)
@@ -314,17 +365,39 @@ class PivWorker(QObject):
         return response, sw1, sw2
 
     def _get_data(self, tag: List[int]) -> Optional[bytes]:
-        """Get data object from PIV applet."""
-        # Build GET DATA command
-        data = [0x5C] + [len(tag)] + tag
-        response, sw1, sw2 = self._send_apdu(INS_GET_DATA, 0x3F, 0xFF, data, 0x00)
+        """Get data object from PIV applet.
+
+        GET DATA is a Case 4 command: it sends a tag selector and expects
+        response data back.  Le=0x00 must be present so the card knows to
+        return data; without it many PIV implementations return SW=9000 with
+        zero bytes.  For objects larger than 256 bytes (e.g. certificates)
+        the card may reply SW=61xx (more data); we chain GET RESPONSE calls
+        until the full object is assembled.
+        """
+        data = [0x5C, len(tag)] + tag
+        # Case 4 short APDU: CLA INS P1 P2 Lc data Le
+        apdu = [0x00, INS_GET_DATA, 0x3F, 0xFF, len(data)] + data + [0x00]
+        response, sw1, sw2 = self._connection.transmit(apdu)
+        print(f"[PIV] GET DATA tag={[hex(b) for b in tag]} → SW={sw1:02X}{sw2:02X}, {len(response)} bytes")
+
+        if sw1 == 0x61:
+            # More data available — reassemble via GET RESPONSE chaining
+            all_data = list(response)
+            while sw1 == 0x61:
+                remaining = sw2 if sw2 != 0x00 else 256
+                get_resp = [0x00, 0xC0, 0x00, 0x00, remaining]
+                response, sw1, sw2 = self._connection.transmit(get_resp)
+                all_data.extend(response)
+                print(f"[PIV] GET RESPONSE → SW={sw1:02X}{sw2:02X}, {len(response)} bytes")
+            if sw1 == 0x90 and sw2 == 0x00:
+                return bytes(all_data)
+            return None
 
         if sw1 == 0x90 and sw2 == 0x00:
             return bytes(response)
-        elif sw1 == 0x6A and sw2 == 0x82:
+        if sw1 == 0x6A and sw2 == 0x82:
             return None  # Data not found
-        else:
-            return None
+        return None
 
     def _parse_certificate(self, data: bytes, slot: PivSlot) -> Optional[PivCertificate]:
         """Parse a PIV certificate from raw data."""
@@ -393,16 +466,11 @@ class PivWorker(QObject):
 
         Uses the same 9-byte AID + Le=0x00 SELECT that solo2-cli uses.
         Does NOT emit error_occurred so the tab can stay silent when PIV is absent.
+
+        Retries up to 5 times with 500 ms delay: the CCID interface comes up
+        later than HID after a device plug-in event.
         """
         if not PCSC_AVAILABLE:
-            self.piv_probed.emit(False)
-            return
-        try:
-            reader_list = readers()
-        except Exception:
-            self.piv_probed.emit(False)
-            return
-        if not reader_list:
             self.piv_probed.emit(False)
             return
 
@@ -415,30 +483,40 @@ class PivWorker(QObject):
         except Exception:
             protocols = [None]
 
-        for reader in reader_list:
-            for proto in protocols:
-                conn = None
-                try:
-                    conn = reader.createConnection()
-                    if proto is not None:
-                        conn.connect(proto)
-                    else:
-                        conn.connect()
-                    _resp, sw1, sw2 = conn.transmit(select_cmd)
+        for attempt in range(6):
+            if attempt > 0:
+                time.sleep(0.5)
+            try:
+                reader_list = readers()
+            except Exception:
+                continue
+            if not reader_list:
+                continue
+
+            for reader in reader_list:
+                for proto in protocols:
+                    conn = None
                     try:
-                        conn.disconnect()
-                    except Exception:
-                        pass
-                    if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61:
-                        self.piv_probed.emit(True)
-                        return
-                    break  # wrong SW, try next reader not next protocol
-                except Exception:
-                    if conn:
+                        conn = reader.createConnection()
+                        if proto is not None:
+                            conn.connect(proto)
+                        else:
+                            conn.connect()
+                        _resp, sw1, sw2 = conn.transmit(select_cmd)
                         try:
                             conn.disconnect()
                         except Exception:
                             pass
+                        if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61:
+                            self.piv_probed.emit(True)
+                            return
+                        break  # wrong SW, try next reader not next protocol
+                    except Exception:
+                        if conn:
+                            try:
+                                conn.disconnect()
+                            except Exception:
+                                pass
 
         self.piv_probed.emit(False)
 
@@ -536,6 +614,63 @@ class PivWorker(QObject):
         finally:
             self._disconnect()
 
+    def load_slots(self) -> None:
+        """Load combined key+cert state for all 4 PIV slots. Emits slots_loaded(list[SlotInfo])."""
+        empty = [SlotInfo(s, False, None, None) for s in PivSlot]
+
+        if not self.check_pcsc_available():
+            self.slots_loaded.emit(empty)
+            return
+        if not self._connect():
+            self.slots_loaded.emit(empty)
+            return
+        try:
+            result = []
+            for slot in PivSlot:
+                cert = None
+                tag = TAG_CERTIFICATE.get(slot)
+                if tag:
+                    raw = self._get_data(tag)
+                    if raw:
+                        cert = self._parse_certificate(raw, slot)
+
+                cached = self._key_cache.get(slot)
+                has_key = cert is not None or cached is not None
+
+                key_type_str = None
+                if cached:
+                    key_type_str = cached.get('algorithm')
+                elif cert:
+                    key_type_str = self._detect_key_type_from_cert(cert.certificate_der)
+
+                result.append(SlotInfo(slot, has_key, key_type_str, cert))
+
+            self.slots_loaded.emit(result)
+        except Exception as e:
+            self.error_occurred.emit(f"Failed to load slots: {e}")
+            self.slots_loaded.emit(empty)
+        finally:
+            self._disconnect()
+
+    def _detect_key_type_from_cert(self, cert_der: bytes) -> Optional[str]:
+        """Detect key type string from a DER certificate's public key."""
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.backends import default_backend
+            from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+            cert = x509.load_der_x509_certificate(cert_der, default_backend())
+            pub = cert.public_key()
+            if isinstance(pub, ec.EllipticCurvePublicKey):
+                return {'secp256r1': 'ECC P-256', 'secp384r1': 'ECC P-384'}.get(
+                    pub.curve.name, f'ECC ({pub.curve.name})'
+                )
+            if isinstance(pub, rsa.RSAPublicKey):
+                return f'RSA {pub.key_size}'
+        except Exception:
+            pass
+        return None
+
     def generate_key(
         self,
         slot: PivSlot,
@@ -545,30 +680,30 @@ class PivWorker(QObject):
     ) -> None:
         """Generate a new PIV key in the specified slot."""
         if not self.check_pcsc_available():
-            self.key_generated.emit(False, "PCSC not available", b"")
+            self.key_generated.emit(False, "PCSC not available", b"", None)
             return
 
         if not self._connect():
-            self.key_generated.emit(False, "Failed to connect to device", b"")
+            self.key_generated.emit(False, "Failed to connect to device", b"", None)
             return
 
         try:
             # Authenticate with management key (required for key generation)
             if not self._authenticate_management_key(mgmt_key):
-                self.key_generated.emit(False, "Management key authentication failed", b"")
+                self.key_generated.emit(False, "Management key authentication failed", b"", None)
                 return
 
             # Verify PIN (required for 9A/9C/9D slots)
             if pin and slot != PivSlot.CARD_AUTH:
                 if not self._verify_pin(pin):
-                    self.key_generated.emit(False, "PIN verification failed", b"")
+                    self.key_generated.emit(False, "PIN verification failed", b"", None)
                     return
 
             key_ref = KEY_REFERENCE.get(slot)
             alg_id = ALGORITHM_ID.get(key_type)
 
             if not key_ref or not alg_id:
-                self.key_generated.emit(False, "Invalid slot or key type", b"")
+                self.key_generated.emit(False, "Invalid slot or key type", b"", None)
                 return
 
             template = [0xAC, 0x03, 0x80, 0x01, alg_id]
@@ -582,10 +717,18 @@ class PivWorker(QObject):
                 # Cache the key info for detection
                 self._key_cache[slot] = {
                     'key_type': key_type,
-                    'algorithm': key_type.value if key_type else "Unknown",
+                    'algorithm': _KEY_TYPE_LABELS.get(key_type, key_type.value if key_type else "Unknown"),
                     'has_certificate': False,
                 }
-                self.key_generated.emit(True, "", pubkey_der)
+                # Auto-store placeholder cert while management key is still authenticated
+                if pubkey_der:
+                    cert_der = self._create_soft_signed_cert(pubkey_der, key_type)
+                    if cert_der and self._put_certificate_raw(slot, cert_der):
+                        self._key_cache[slot]['has_certificate'] = True
+                        print(f"[PIV] Placeholder cert stored in slot {slot.name}")
+                    elif cert_der:
+                        print(f"[PIV] WARNING: PUT DATA returned failure for slot {slot.name}")
+                self.key_generated.emit(True, "", pubkey_der, slot)
             elif sw1 == 0x61:
                 # More data available - need to call GET RESPONSE
                 print(f"[PIV] Key generated, retrieving public key ({sw2} bytes)...")
@@ -596,19 +739,27 @@ class PivWorker(QObject):
                     # Cache the key info for detection
                     self._key_cache[slot] = {
                         'key_type': key_type,
-                        'algorithm': key_type.value if key_type else "Unknown",
+                        'algorithm': _KEY_TYPE_LABELS.get(key_type, key_type.value if key_type else "Unknown"),
                         'has_certificate': False,
                     }
-                    self.key_generated.emit(True, "", pubkey_der)
+                    # Auto-store placeholder cert while management key is still authenticated
+                    if pubkey_der:
+                        cert_der = self._create_soft_signed_cert(pubkey_der, key_type)
+                        if cert_der and self._put_certificate_raw(slot, cert_der):
+                            self._key_cache[slot]['has_certificate'] = True
+                            print(f"[PIV] Placeholder cert stored in slot {slot.name}")
+                        elif cert_der:
+                            print(f"[PIV] WARNING: PUT DATA returned failure for slot {slot.name}")
+                    self.key_generated.emit(True, "", pubkey_der, slot)
                 else:
-                    self.key_generated.emit(False, f"Failed to retrieve public key: SW={sw1_2:02X}{sw2_2:02X}", b"")
+                    self.key_generated.emit(False, f"Failed to retrieve public key: SW={sw1_2:02X}{sw2_2:02X}", b"", None)
             elif sw1 == 0x69 and sw2 == 0x82:
-                self.key_generated.emit(False, "Security status not satisfied", b"")
+                self.key_generated.emit(False, "Security status not satisfied", b"", None)
             else:
-                self.key_generated.emit(False, f"Generation failed: SW={sw1:02X}{sw2:02X}", b"")
+                self.key_generated.emit(False, f"Generation failed: SW={sw1:02X}{sw2:02X}", b"", None)
 
         except Exception as e:
-            self.key_generated.emit(False, str(e), b"")
+            self.key_generated.emit(False, str(e), b"", None)
         finally:
             self._disconnect()
 
@@ -852,6 +1003,66 @@ class PivWorker(QObject):
             return [0x81, length]
         else:
             return [0x82, (length >> 8) & 0xFF, length & 0xFF]
+
+    def _create_soft_signed_cert(self, pubkey_der: bytes, key_type: PivKeyType) -> Optional[bytes]:
+        """Create a self-signed placeholder certificate for a PIV slot public key.
+
+        Uses a throwaway signing key so the cert can be written to the card without
+        needing access to the PIV slot private key. The stored cert survives reconnects,
+        allowing load_slots() to detect that a key exists.
+        """
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.x509.oid import NameOID
+            import datetime
+
+            print(f"[PIV] Creating placeholder cert for {key_type.value}, pubkey={len(pubkey_der)}B")
+            pub = serialization.load_der_public_key(pubkey_der)
+            subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "SoloKeys PIV Key")])
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if isinstance(pub, ec.EllipticCurvePublicKey):
+                sign_key = ec.generate_private_key(pub.curve)
+            else:
+                from cryptography.hazmat.primitives.asymmetric import rsa
+                sign_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            cert = (
+                x509.CertificateBuilder()
+                .subject_name(subject)
+                .issuer_name(subject)
+                .public_key(pub)
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(now)
+                .not_valid_after(now + datetime.timedelta(days=3650))
+                .sign(sign_key, hashes.SHA256())
+            )
+            result = cert.public_bytes(serialization.Encoding.DER)
+            print(f"[PIV] Placeholder cert created: {len(result)}B DER")
+            return result
+        except Exception as e:
+            import traceback
+            print(f"[PIV] Failed to create placeholder cert: {e}")
+            traceback.print_exc()
+            return None
+
+    def _put_certificate_raw(self, slot: PivSlot, cert_der: bytes) -> bool:
+        """Write raw DER certificate bytes to a PIV slot via PUT DATA.
+
+        Assumes management key authentication has already been performed.
+        """
+        tag = TAG_CERTIFICATE.get(slot)
+        if not tag:
+            return False
+        data = list(cert_der)
+        cert_tlv = [0x70] + self._encode_length(len(data)) + data
+        cert_tlv += [0x71, 0x01, 0x00, 0xFE, 0x00]
+        data_obj = [0x53] + self._encode_length(len(cert_tlv)) + cert_tlv
+        full_data = [0x5C, len(tag)] + tag + data_obj
+        print(f"[PIV] PUT DATA: slot={slot.name}, cert={len(cert_der)}B, payload={len(full_data)}B")
+        _, sw1, sw2 = self._send_apdu(INS_PUT_DATA, 0x3F, 0xFF, full_data)
+        print(f"[PIV] PUT DATA result: SW={sw1:02X}{sw2:02X}")
+        return sw1 == 0x90 and sw2 == 0x00
 
     def get_pin_status(self) -> None:
         """Get current PIN status and retry counters."""

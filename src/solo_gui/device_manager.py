@@ -1,20 +1,24 @@
 """Singleton device manager for centralized, thread-safe device access."""
 
+import logging
 import os
 import struct
 import threading
 import time
-from typing import Optional, Callable, Any, Dict, List
 from dataclasses import dataclass
 from enum import Enum, auto
-from queue import Queue, Empty
+from queue import Empty, Queue
+from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import QObject, Signal, Slot, QThread
-
-from fido2.hid import CtapHidDevice, CTAPHID
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 from fido2.ctap2 import Ctap2
-from fido2.ctap2.pin import ClientPin
 from fido2.ctap2.credman import CredentialManagement
+from fido2.ctap2.pin import ClientPin
+from fido2.hid import CTAPHID
+
+from .models.device import SoloDevice
+
+_log = logging.getLogger("solo2device")
 
 
 class RequestType(Enum):
@@ -29,6 +33,7 @@ class RequestType(Enum):
     RENAME_CREDENTIAL = auto()
     SET_PIN = auto()
     CHANGE_PIN = auto()
+    BROWSER_APDU = auto()
 
 
 @dataclass
@@ -68,7 +73,7 @@ class DeviceManager(QObject):
     
     def __init__(self):
         super().__init__()
-        self._device_path: Optional[str] = None
+        self._device: Optional[SoloDevice] = None
         self._ctap2: Optional[Ctap2] = None
         self._client_pin: Optional[ClientPin] = None
         self._pin_token: Optional[bytes] = None
@@ -80,24 +85,23 @@ class DeviceManager(QObject):
         self._running = False
         self._mutex = threading.Lock()
     
-    def start(self, device_path: str) -> bool:
-        """Start the device manager with the given device path."""
+    def start(self, device: SoloDevice) -> bool:
+        """Start the device manager with the given device."""
         with self._lock:
             if self._running:
                 return True
-            
-            self._device_path = device_path
-            
+
+            self._device = device
             if not self._open_device():
                 return False
-            
+
             self._running = True
             self._worker_thread = QThread()
             self.moveToThread(self._worker_thread)
             self._worker_thread.started.connect(self._process_loop)
             self._worker_thread.start()
-            
-            self.device_connected.emit(device_path)
+
+            self.device_connected.emit(device.path)
             return True
     
     def stop(self):
@@ -121,16 +125,20 @@ class DeviceManager(QObject):
     def _open_device(self) -> bool:
         """Open the device connection."""
         try:
-            for hid_dev in CtapHidDevice.list_devices():
-                if hid_dev.descriptor.path == self._device_path:
-                    self._ctap2 = Ctap2(hid_dev)
-                    return True
+            if self._device is None:
+                return False
+            _log.debug("_open_device: looking for device=%r", getattr(self._device, "path", None))
+            self._ctap2 = self._device.open_ctap2()
+            if self._ctap2 is not None:
+                _log.debug("_open_device: SUCCESS")
+                return True
+            _log.debug("_open_device: FAILED — device.open_ctap2() returned None")
             return False
         except Exception as e:
             # CTAP error 0x00 is actually success, device is already open
             if "0x00" in str(e) or "SUCCESS" in str(e):
                 return True
-            print(f"[DeviceManager] Failed to open: {e}")
+            _log.debug("_open_device: exception: %s", e)
             return False
     
     def _close_device(self):
@@ -147,7 +155,7 @@ class DeviceManager(QObject):
         if not self._open_device():
             return False
         
-        # Reset CTAPHID channel
+        # Reset CTAPHID channel (skip for pipe device — no channel concept)
         try:
             if self._ctap2:
                 hid_dev = self._ctap2.device
@@ -166,9 +174,9 @@ class DeviceManager(QObject):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                for hid_dev in CtapHidDevice.list_devices():
-                    if hid_dev.descriptor.path == self._device_path:
-                        self._ctap2 = Ctap2(hid_dev)
+                if self._device is not None:
+                    self._ctap2 = self._device.open_ctap2()
+                    if self._ctap2 is not None:
                         return True
             except Exception:
                 pass
@@ -214,6 +222,8 @@ class DeviceManager(QObject):
                 self._do_set_pin(request)
             elif request.request_type == RequestType.CHANGE_PIN:
                 self._do_change_pin(request)
+            elif request.request_type == RequestType.BROWSER_APDU:
+                self._do_browser_apdu(request)
         except Exception as e:
             if request.callback:
                 request.callback(None, str(e))
@@ -251,15 +261,19 @@ class DeviceManager(QObject):
     def _do_get_info(self, request: DeviceRequest):
         """Execute GET_INFO request."""
         if not self._ensure_device():
+            _log.debug("_do_get_info: _ensure_device() failed")
             request.callback(None, "Device not connected")
             return
-        
+
         try:
+            _log.debug("_do_get_info: calling ctap2.get_info()")
             info = self._ctap2.get_info()
+            opts = dict(info.options) if info.options else {}
+            _log.debug("_do_get_info: OK versions=%s options=%s", info.versions, opts)
             result = {
                 'aaguid': info.aaguid,
                 'versions': info.versions,
-                'options': dict(info.options) if info.options else {},
+                'options': opts,
             }
             request.callback(result, None)
         except Exception as e:
@@ -458,20 +472,37 @@ class DeviceManager(QObject):
     def _do_set_pin(self, request: DeviceRequest):
         """Execute SET_PIN request."""
         new_pin = request.args.get('new_pin')
-        
+
         if not self._ensure_device():
+            _log.debug("_do_set_pin: _ensure_device() failed")
             request.callback(None, "Device not connected")
             return
-        
+
         try:
+            _log.debug("_do_set_pin: calling ClientPin.set_pin()")
             if self._client_pin is None:
                 self._client_pin = ClientPin(self._ctap2)
             self._client_pin.set_pin(new_pin)
             self._cached_pin = new_pin
+            _log.debug("_do_set_pin: OK")
             request.callback(True, None)
         except Exception as e:
+            _log.debug("_do_set_pin: exception: %s", e)
             request.callback(False, str(e))
     
+    def _do_browser_apdu(self, request: DeviceRequest):
+        """Execute a browser APDU request (CTAPHID vendor command 0x70)."""
+        if not self._ensure_device():
+            request.callback(None, "Device not connected")
+            return
+
+        try:
+            apdu_bytes = request.args['apdu_bytes']
+            response = self._ctap2.device.call(0x70, bytes(apdu_bytes))
+            request.callback(response, None)
+        except Exception as e:
+            request.callback(None, str(e))
+
     def _do_change_pin(self, request: DeviceRequest):
         """Execute CHANGE_PIN request."""
         current_pin = request.args.get('current_pin')
@@ -600,6 +631,17 @@ class DeviceManager(QObject):
             operation_id=operation_id
         ))
     
+    def send_browser_apdu(self, apdu_bytes: bytes,
+                          callback: Callable[[bytes, Optional[str]], None],
+                          operation_id: str = ""):
+        """Queue a browser APDU request (CTAPHID vendor command 0x70)."""
+        self.submit_request(DeviceRequest(
+            request_type=RequestType.BROWSER_APDU,
+            callback=callback,
+            args={'apdu_bytes': apdu_bytes},
+            operation_id=operation_id
+        ))
+
     def set_cached_pin(self, pin: str):
         """Cache PIN for the session (memory only, cleared on disconnect)."""
         self._cached_pin = pin

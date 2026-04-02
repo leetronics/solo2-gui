@@ -13,6 +13,7 @@ Build with:
 
 import os
 import sys
+import importlib.util
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -78,7 +79,25 @@ datas = [
     (str(Path(fido2.__file__).parent / "public_suffix_list.dat"), "fido2"),
     # certifi CA bundle for HTTPS requests (firmware update downloads)
     (certifi.where(), "certifi"),
+    # App icons (theme-aware with fallback)
+    (str(src_root / "solo_gui" / "resources" / "logo-light.png"), "resources"),
+    (str(src_root / "solo_gui" / "resources" / "logo-dark.png"), "resources"),
+    (str(src_root / "solo_gui" / "resources" / "logo-square.png"), "resources"),
 ]
+
+smartcard_hiddenimports = []
+if importlib.util.find_spec("smartcard") is not None:
+    smartcard_hiddenimports = [
+        "smartcard",
+        "smartcard.System",
+        "smartcard.Exceptions",
+        "smartcard.util",
+        "smartcard.CardConnection",
+        "smartcard.pcsc.PCSCContext",
+        "smartcard.pcsc.PCSCCardConnection",
+        "smartcard.scard",
+        "smartcard.scard.scard",
+    ]
 
 # ---------------------------------------------------------------------------
 # Analysis
@@ -119,7 +138,7 @@ a = Analysis(
         "PySide6.QtSvg",
         "PySide6.QtSvgWidgets",
         "PySide6.QtNetwork",
-    ],
+    ] + smartcard_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=platform_rthooks,
@@ -191,7 +210,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="SoloKeys GUI.app",
-        icon=None,
+        icon=str(project_root / "src" / "solo_gui" / "resources" / "logo-square.png"),
         bundle_identifier="com.solokeys.solokeys-gui",
         version="0.1.0",
         info_plist={
@@ -228,7 +247,7 @@ elif sys.platform == "win32":
         target_arch=None,
         codesign_identity=None,
         entitlements_file=None,
-        icon=None,
+        icon=str(project_root / "src" / "solo_gui" / "resources" / "icon-light.ico"),
     )
 
     coll = COLLECT(

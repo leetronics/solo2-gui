@@ -55,6 +55,7 @@ echo ""
 echo "Installing Python dependencies..."
 pip3 install -r requirements.txt
 pip3 install "pyinstaller>=6.2.0"
+pip3 install "Pillow>=10.0.0"
 
 # ---------------------------------------------------------------------------
 # 4. Clean previous build artifacts

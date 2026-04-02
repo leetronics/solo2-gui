@@ -20,6 +20,22 @@ from PySide6.QtCore import QObject, Signal
 
 from solo_gui.device_manager import DeviceManager
 
+PASSWORD_ONLY_PREFIX = "__solo_pw__:"
+
+
+def encode_password_only_label(name: str) -> bytes:
+    return f"{PASSWORD_ONLY_PREFIX}{name}".encode("utf-8")
+
+
+def strip_password_only_label(name: str) -> str:
+    if name.startswith(PASSWORD_ONLY_PREFIX):
+        return name[len(PASSWORD_ONLY_PREFIX):]
+    return name
+
+
+def is_password_only_label(label: bytes) -> bool:
+    return label.startswith(PASSWORD_ONLY_PREFIX.encode("utf-8"))
+
 
 class OtpKind(Enum):
     """OTP credential types."""
@@ -64,14 +80,33 @@ class Credential:
     touch_required: bool = False
     protected: bool = False
     encrypted: bool = False
+    has_password_safe: bool = False
 
     @property
     def name(self) -> str:
-        return self.id.decode('utf-8', errors='replace')
+        return strip_password_only_label(self.id.decode('utf-8', errors='replace'))
+
+    @property
+    def password_only(self) -> bool:
+        return self.has_password_safe and is_password_only_label(self.id)
 
     @property
     def is_otp(self) -> bool:
-        return self.otp is not None
+        return self.otp is not None and not self.password_only
+
+    @property
+    def kind_name(self) -> str:
+        if self.password_only:
+            return "Password"
+        if self.otp is not None:
+            return str(self.otp)
+        if self.other is not None:
+            return str(self.other)
+        return "UNKNOWN"
+
+    @property
+    def algorithm_name(self) -> str:
+        return self.algorithm.name
 
 
 @dataclass
@@ -80,6 +115,7 @@ class OtpResult:
     credential: Credential
     code: str
     counter: Optional[int] = None
+    remaining_seconds: int = 0
 
 
 @dataclass
@@ -114,6 +150,7 @@ class SecretsAppProtocol:
     INS_SET_PIN = 0xb4       # Set initial PIN
     INS_GET_CREDENTIAL = 0xb5
     INS_UPDATE_CREDENTIAL = 0xb7
+    INS_YK_API_REQUEST = 0x01
     
     # ISO 7816 status words
     SW_SUCCESS = (0x90, 0x00)
@@ -157,6 +194,8 @@ class TotpWorker(QObject):
     credential_deleted = Signal(bool, str)
     credential_data_loaded = Signal(object)
     otp_generated = Signal(object)
+    reverse_hotp_verified = Signal(bool, str)
+    hmac_calculated = Signal(str)
     pin_verified = Signal(bool, str)
     pin_changed = Signal(bool, str)
     pin_required = Signal()
@@ -438,12 +477,22 @@ class TotpWorker(QObject):
                 
                 # Determine type from kind (high nibble)
                 kind = kind_algo & 0xF0
+                otp_kind = None
+                other_kind = None
                 if kind == 0x20:
                     otp_kind = OtpKind.TOTP
                 elif kind == 0x10:
                     otp_kind = OtpKind.HOTP
-                else:
-                    otp_kind = None
+                elif kind == 0x30:
+                    other_kind = OtherKind.REVERSE_HOTP
+                elif kind == 0x40:
+                    other_kind = OtherKind.HMAC
+
+                algorithm = {
+                    0x01: Algorithm.SHA1,
+                    0x02: Algorithm.SHA256,
+                    0x03: Algorithm.SHA512,
+                }.get(kind_algo & 0x0F, Algorithm.SHA1)
                 
                 # Remaining bytes are: <label...> [<properties>]
                 # In version 1: entry_len = label_len + 2 (kind_algo + properties)
@@ -461,6 +510,7 @@ class TotpWorker(QObject):
                     # and the rest is the label
                     touch_required = False
                     protected = False
+                    has_password_safe = False
                     
                     if remaining_len >= 1:
                         # Last byte is properties (only in version 1 format)
@@ -473,6 +523,7 @@ class TotpWorker(QObject):
                         # bit 2 (0x04) = pws_data_exist
                         touch_required = bool(properties & 0x01)
                         protected = bool(properties & 0x02)
+                        has_password_safe = bool(properties & 0x04)
                         print(f"[TOTP] Parsed credential: label={label_bytes.decode('utf-8', errors='replace')}, properties=0x{properties:02x}, touch={touch_required}, protected={protected}")
                     else:
                         label_bytes = entry_data
@@ -481,16 +532,24 @@ class TotpWorker(QObject):
                     cred = Credential(
                         id=label_bytes,
                         otp=otp_kind,
+                        other=other_kind,
+                        algorithm=algorithm,
                         touch_required=touch_required,
                         protected=protected,
+                        encrypted=protected,
+                        has_password_safe=has_password_safe,
                     )
                     credentials.append(cred)
             
             self.credentials_loaded.emit(credentials)
         
-        # Request version 1 format (includes properties byte)
-        # Version is sent in data field, not P1
-        self._send_apdu(SecretsAppProtocol.INS_LIST, data=bytes([0x01]), callback=on_list)
+        def do_list():
+            # Request version 1 format (includes properties byte)
+            self._send_apdu(SecretsAppProtocol.INS_LIST, data=bytes([0x01]), callback=on_list)
+
+        # PIN session is cached in firmware for the whole session after VerifyPin.
+        # No need to re-verify before each LIST.
+        do_list()
 
     def add_credential(self, credential: Credential, secret: bytes) -> None:
         """Add a new credential to the device using TLV format."""
@@ -516,12 +575,21 @@ class TotpWorker(QObject):
             payload.extend(name_bytes)
 
             # Tag::Key (0x73): kind+algo byte, digits, secret
+            algo_nibble = {
+                Algorithm.SHA1: 0x01,
+                Algorithm.SHA256: 0x02,
+                Algorithm.SHA512: 0x03,
+            }.get(credential.algorithm, 0x01)
             if credential.otp == OtpKind.TOTP:
-                kind_algo = 0x21  # TOTP (0x20) + SHA1 (0x01)
+                kind_algo = 0x20 | algo_nibble
             elif credential.otp == OtpKind.HOTP:
-                kind_algo = 0x11  # HOTP (0x10) + SHA1 (0x01)
+                kind_algo = 0x10 | algo_nibble
+            elif credential.other == OtherKind.REVERSE_HOTP:
+                kind_algo = 0x30 | algo_nibble
+            elif credential.other == OtherKind.HMAC:
+                kind_algo = 0x40 | algo_nibble
             else:
-                kind_algo = 0x21
+                kind_algo = 0x20 | algo_nibble
             digits = credential.digits if hasattr(credential, 'digits') else 6
             key_data = bytearray([kind_algo, digits]) + bytearray(secret)
             payload.append(0x73)
@@ -546,25 +614,24 @@ class TotpWorker(QObject):
                 payload.append(0x04)
                 payload.extend([0x00, 0x00, 0x00, 0x00])
 
+            if credential.login is not None:
+                payload.append(0x83)
+                payload.append(len(credential.login))
+                payload.extend(credential.login)
+            if credential.password is not None:
+                payload.append(0x84)
+                payload.append(len(credential.password))
+                payload.extend(credential.password)
+            if credential.metadata is not None:
+                payload.append(0x85)
+                payload.append(len(credential.metadata))
+                payload.extend(credential.metadata)
+
             self._send_apdu(SecretsAppProtocol.INS_PUT, data=bytes(payload), callback=on_add)
 
-        # The firmware uses per-request authorization: the PIN session is cleared after
-        # every non-VerifyPin command. Re-verify the cached PIN immediately before adding
-        # a PIN-protected credential so the session is fresh when the PUT is sent.
-        if credential.protected and self._pin:
-            def on_reverify(sw1, sw2, response):
-                if sw1 == 0x90 and sw2 == 0x00:
-                    do_add()
-                else:
-                    tries = sw2 & 0x0F if sw1 == 0x63 else None
-                    msg = f"PIN verification failed ({tries} tries remaining)" if tries is not None else f"PIN verification failed: {sw1:02x}{sw2:02x}"
-                    self.credential_added.emit(False, msg)
-            pin_bytes = self._pin.encode()
-            self._send_apdu(SecretsAppProtocol.INS_VERIFY_PIN,
-                            data=bytes([0x80, len(pin_bytes)]) + pin_bytes,
-                            callback=on_reverify)
-        else:
-            do_add()
+        # PIN session is cached in firmware for the whole session after VerifyPin.
+        # No need to re-verify before each PUT.
+        do_add()
 
     def delete_credential(self, credential: Credential) -> None:
         """Delete a credential from the device."""
@@ -603,7 +670,8 @@ class TotpWorker(QObject):
                     # Truncate to required digits (modulo 10^digits)
                     code_value = code_value % (10 ** digits)
                     code = str(code_value).zfill(digits)
-                    result = OtpResult(credential=credential, code=code)
+                    remaining_seconds = (credential.period - int(time.time()) % credential.period) if credential.otp == OtpKind.TOTP else 0
+                    result = OtpResult(credential=credential, code=code, remaining_seconds=remaining_seconds)
                     self.otp_generated.emit(result)
                 elif len(response) >= 5:
                     # Raw format: <digits> <4-byte-code>
@@ -612,7 +680,8 @@ class TotpWorker(QObject):
                     code_value = int.from_bytes(code_bytes, 'big')
                     code_value = code_value % (10 ** digits)
                     code = str(code_value).zfill(digits)
-                    result = OtpResult(credential=credential, code=code)
+                    remaining_seconds = (credential.period - int(time.time()) % credential.period) if credential.otp == OtpKind.TOTP else 0
+                    result = OtpResult(credential=credential, code=code, remaining_seconds=remaining_seconds)
                     self.otp_generated.emit(result)
                 else:
                     self.error_occurred.emit(f"Invalid OTP response format: {response.hex()}")
@@ -621,29 +690,161 @@ class TotpWorker(QObject):
             else:
                 self.error_occurred.emit(f"Failed to generate OTP: {sw1:02x}{sw2:02x}")
         
-        # Build CALCULATE data in TLV format
-        # Format: 71 <len> <name> 74 <len> <challenge>
-        # Tag::Name (0x71), Tag::Challenge (0x74)
-        payload = bytearray()
-        
-        # Tag::Name (0x71)
-        payload.append(0x71)  # Tag::Name
-        payload.append(len(credential.id))
+        def do_calculate():
+            # Build CALCULATE data: Tag::Name (0x71) + Tag::Challenge (0x74)
+            payload = bytearray()
+            payload.append(0x71)
+            payload.append(len(credential.id))
+            payload.extend(credential.id)
+            if credential.otp == OtpKind.TOTP:
+                challenge = struct.pack('>Q', int(time.time()) // credential.period)
+            else:
+                challenge = struct.pack('>Q', 0)
+            payload.append(0x74)
+            payload.append(len(challenge))
+            payload.extend(challenge)
+            self._send_apdu(SecretsAppProtocol.INS_CALCULATE, p1=0x00, p2=0x01,
+                           data=bytes(payload), callback=on_calculate)
+
+        # PIN session is cached in firmware for the whole session after VerifyPin.
+        # No need to re-verify before each CALCULATE.
+        do_calculate()
+
+    def load_credential_data(self, credential: Credential) -> None:
+        """Load static password-safe fields for a credential."""
+        def on_data(sw1, sw2, response):
+            if (sw1, sw2) == SecretsAppProtocol.SW_PIN_REQUIRED:
+                self.pin_required.emit()
+                return
+            if (sw1, sw2) == SecretsAppProtocol.SW_TOUCH_REQUIRED:
+                self.touch_required.emit()
+                return
+            if sw1 != 0x90 or sw2 != 0x00:
+                self.error_occurred.emit(f"Failed to get credential data: {sw1:02x}{sw2:02x}")
+                return
+
+            data = Credential(
+                id=credential.id,
+                otp=credential.otp,
+                other=credential.other,
+                algorithm=credential.algorithm,
+                digits=credential.digits,
+                period=credential.period,
+                touch_required=credential.touch_required,
+                protected=credential.protected,
+                encrypted=credential.encrypted,
+                has_password_safe=credential.has_password_safe,
+            )
+            offset = 0
+            while offset + 2 <= len(response):
+                tag = response[offset]
+                length = response[offset + 1]
+                value = response[offset + 2: offset + 2 + length]
+                offset += 2 + length
+                if tag == 0x83:
+                    data.login = bytes(value)
+                elif tag == 0x84:
+                    data.password = bytes(value)
+                elif tag == 0x85:
+                    data.metadata = bytes(value)
+            self.credential_data_loaded.emit(data)
+
+        payload = bytes([0x71, len(credential.id)]) + credential.id
+        self._send_apdu(SecretsAppProtocol.INS_GET_CREDENTIAL, data=payload, callback=on_data)
+
+    def update_credential_data(
+        self,
+        credential: Credential,
+        *,
+        new_name: Optional[str] = None,
+        login: Optional[str] = None,
+        password: Optional[str] = None,
+        metadata: Optional[str] = None,
+    ) -> None:
+        """Update password-safe fields for an existing credential."""
+        def on_update(sw1, sw2, response):
+            if (sw1, sw2) == SecretsAppProtocol.SW_PIN_REQUIRED:
+                self.pin_required.emit()
+                return
+            if (sw1, sw2) == SecretsAppProtocol.SW_TOUCH_REQUIRED:
+                self.touch_required.emit()
+                return
+            if sw1 == 0x90 and sw2 == 0x00:
+                self.credential_updated.emit(True, "")
+            else:
+                self.credential_updated.emit(False, f"Failed to update credential: {sw1:02x}{sw2:02x}")
+
+        payload = bytearray([0x71, len(credential.id)])
         payload.extend(credential.id)
-        
-        # Tag::Challenge (0x74)
-        # Challenge: timestamp for TOTP (8 bytes, big-endian)
-        if credential.otp == OtpKind.TOTP:
-            challenge = struct.pack('>Q', int(time.time()) // credential.period)
-        else:
-            challenge = struct.pack('>Q', 0)  # Counter for HOTP
-        
-        payload.append(0x74)  # Tag::Challenge
-        payload.append(len(challenge))
-        payload.extend(challenge)
-        
-        self._send_apdu(SecretsAppProtocol.INS_CALCULATE, p1=0x00, p2=0x01,
-                       data=bytes(payload), callback=on_calculate)
+        if new_name:
+            new_name_bytes = new_name.encode("utf-8")
+            payload.extend([0x71, len(new_name_bytes)])
+            payload.extend(new_name_bytes)
+        if login is not None:
+            login_bytes = login.encode("utf-8")
+            payload.extend([0x83, len(login_bytes)])
+            payload.extend(login_bytes)
+        if password is not None:
+            password_bytes = password.encode("utf-8")
+            payload.extend([0x84, len(password_bytes)])
+            payload.extend(password_bytes)
+        if metadata is not None:
+            metadata_bytes = metadata.encode("utf-8")
+            payload.extend([0x85, len(metadata_bytes)])
+            payload.extend(metadata_bytes)
+        self._send_apdu(SecretsAppProtocol.INS_UPDATE_CREDENTIAL, data=bytes(payload), callback=on_update)
+
+    def verify_reverse_hotp(self, credential: Credential, code: str) -> None:
+        """Verify a reverse-HOTP code."""
+        def on_verify(sw1, sw2, response):
+            if (sw1, sw2) == SecretsAppProtocol.SW_PIN_REQUIRED:
+                self.pin_required.emit()
+                return
+            if (sw1, sw2) == SecretsAppProtocol.SW_TOUCH_REQUIRED:
+                self.touch_required.emit()
+                return
+            if sw1 == 0x90 and sw2 == 0x00:
+                self.reverse_hotp_verified.emit(True, "Verification passed")
+            else:
+                self.reverse_hotp_verified.emit(False, f"Verification failed: {sw1:02x}{sw2:02x}")
+
+        code_value = int(code)
+        payload = bytearray([0x71, len(credential.id)])
+        payload.extend(credential.id)
+        payload.extend([0x75, 0x04])
+        payload.extend(code_value.to_bytes(4, "big"))
+        self._send_apdu(SecretsAppProtocol.INS_VERIFY_CODE, data=bytes(payload), callback=on_verify)
+
+    def calculate_hmac(self, slot: int, challenge: bytes) -> None:
+        """Calculate a KeepassXC-compatible HMAC response using Yubikey slots."""
+        if len(challenge) > 63:
+            self.error_occurred.emit("Challenge must be 63 bytes or shorter")
+            return
+
+        padded = challenge + bytes([64 - len(challenge)]) * (64 - len(challenge))
+        slot_cmd = 0x30 if slot == 1 else 0x38
+        apdu = bytearray([0x00, SecretsAppProtocol.INS_YK_API_REQUEST, slot_cmd, 0x00, len(padded)])
+        apdu.extend(padded)
+
+        def on_response(response, error):
+            if error:
+                self.error_occurred.emit(str(error))
+                return
+            if not response or len(response) < 2:
+                self.error_occurred.emit("Invalid HMAC response")
+                return
+            sw1, sw2, data_out = SecretsAppProtocol.parse_status(response)
+            if sw1 == 0x90 and sw2 == 0x00:
+                self.hmac_calculated.emit(data_out.hex())
+            else:
+                self.error_occurred.emit(f"Failed to calculate HMAC: {sw1:02x}{sw2:02x}")
+
+        self._device_manager.vendor_command(
+            SecretsAppProtocol.VENDOR_CMD,
+            bytes(apdu),
+            on_response,
+            operation_id=f"totp_hmac_{slot}",
+        )
 
     def verify_pin(self, pin: str) -> None:
         """Verify PIN for the secrets app."""

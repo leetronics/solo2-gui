@@ -1,123 +1,139 @@
 # SoloKeys GUI
 
-Platform-independent GUI for managing SoloKeys Solo 2 FIDO2 tokens.
+Desktop GUI for managing Solo 2 devices across Linux, macOS, and Windows.
 
-## Features
+## What It Does
 
-- Device detection and status monitoring
-- FIDO2 credential management
-- PIV (SSH/GPG) key management
-- TOTP management (requires firmware changes)
-- Firmware updates
-- Cross-platform support (Windows, macOS, Linux)
+- Detects connected devices and shows firmware, capabilities, and diagnostics
+- Manages FIDO2 resident credentials and PIN state
+- Checks for firmware updates and installs them through the GUI
+- Manages TOTP / Secrets credentials, including touch- and PIN-protected entries
+- Exposes PIV and OpenPGP management flows when smartcard support is available
+- Includes admin and hardware-developer tabs for reboot, reset, provisioning, and attestation tasks
+- Registers a Chrome/Chromium native messaging host for browser-based TOTP integration
+- Supports tray/background use and optional autostart
 
 ## Requirements
 
-- Python 3.10+
-- Qt6 (included with PySide6)
+- Python 3.10 or newer
+- `libusb` available on the host system
+- PySide6 / Qt 6
+- Optional: `pcscd` plus `pyscard` for PIV and OpenPGP features
 
-## Installation
-
-### Linux (from source)
+## Running From Source
 
 ```bash
-# System dependencies
+git clone git@github.com:leetronics/solo2-gui.git
+cd solo2-gui
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
+# Optional for PIV / OpenPGP support:
+# pip install pyscard
+
+PYTHONPATH=src python -m solo_gui.main
+```
+
+`poetry install` also works in this repository if you prefer Poetry over a plain virtualenv.
+
+## Platform Notes
+
+### Linux
+
+Install `libusb` and, if you want smartcard-backed features, `pcscd`.
+
+Example for Debian/Ubuntu:
+
+```bash
 sudo apt install -y libusb-1.0-0
-
-# Optional: PIV smartcard support
+# Optional:
 sudo apt install -y pcscd
+```
 
-# udev rule for non-root HID access
+For non-root HID access, install udev rules for SoloKeys devices:
+
+```bash
 echo 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="beee", MODE="0660", GROUP="plugdev"' \
     | sudo tee /etc/udev/rules.d/70-solokeys.rules
 echo 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b000", MODE="0660", GROUP="plugdev"' \
     | sudo tee -a /etc/udev/rules.d/70-solokeys.rules
 sudo udevadm control --reload-rules
 sudo usermod -aG plugdev "$USER"
-# Log out and back in for the group change to take effect
-
-# Clone, install and run
-git clone https://github.com/solokeys/solokeys-gui.git
-cd solokeys-gui
-pip install -r requirements.txt
-# Optional: pip install pyscard  (for PIV tab)
-PYTHONPATH=src python src/solo_gui/main.py
 ```
 
-### macOS (pre-built binary)
+Log out and back in after changing group membership.
 
-Download `SoloKeys GUI-<version>.dmg` from the [Releases](../../releases) page,
-open it and drag **SoloKeys GUI.app** to your Applications folder.
+### macOS
 
-To build from source:
+Install `libusb` via Homebrew before running from source:
 
 ```bash
 brew install libusb
-./build_macos.sh
-# App appears at dist/SoloKeys GUI.app
 ```
 
-### Windows (pre-built binary)
-
-Download `SoloKeys GUI-<version>.zip` from the [Releases](../../releases) page,
-extract and run `SoloKeys GUI.exe`.
-
-To build from source, install [libusb for Windows](https://github.com/libusb/libusb/releases)
-and run `build_windows.bat`.
-
-### Development Setup
+To build a distributable app bundle and DMG:
 
 ```bash
-# Clone the repository
-git clone https://github.com/solokeys/solokeys-gui.git
-cd solokeys-gui
-
-# Install dependencies using Poetry (recommended)
-poetry install
-
-# Or using pip
-pip install -r requirements.txt
-
-# Run the application
-PYTHONPATH=src python src/solo_gui/main.py
+./build_macos.sh
 ```
 
-## Project Structure
+Artifacts are written to `dist/`.
 
+### Windows
+
+Install Python 3.10+ and make sure `libusb-1.0.dll` is available. The build script looks for it in:
+
+- `C:\libusb\MS64\dll\libusb-1.0.dll`
+- `C:\tools\libusb\bin\libusb-1.0.dll`
+- `%LIBUSB_PATH%`
+
+To build the Windows package:
+
+```bat
+build_windows.bat
 ```
-solokeys-gui/
-├── src/solo_gui/           # Main application code
-│   ├── models/             # Device abstraction and data models
-│   ├── views/              # UI components and windows
-│   ├── workers/            # Background thread workers
-│   └── utils/              # Utility functions
-├── tests/                  # Test suite
-├── docs/                   # Documentation
-└── packaging/              # Platform-specific packaging
-```
+
+The primary distributable is produced as an installer in `dist\installer\`.
+
+The build also creates an intermediate PyInstaller app folder in `dist\SoloKeys GUI\`. That folder is packaged into the installer together with the native messaging host helper.
+
+## Browser Integration
+
+The application can register a native messaging host named `com.solokeys.secrets` for Chrome/Chromium. When the app starts, it attempts to register the host automatically if it is missing, and the same action is available in `Settings -> Browser`.
+
+The native host supports two modes:
+
+- Forward requests to the running GUI over a local socket
+- Fall back to direct HID access when the GUI is not available
 
 ## Development
 
-### Code Style
+### Project Layout
 
-- Uses Black for code formatting
-- MyPy for type checking
-- Conventional commit messages
+```text
+src/solo_gui/            Main application package
+src/solo_gui/views/      Main window and tab UI
+src/solo_gui/workers/    Background workers for device operations
+src/solo_gui/models/     Device abstraction and monitoring
+src/solo_gui/utils/      Autostart, USB monitoring, helpers
+solokeys_gui.spec        PyInstaller spec for the desktop app
+native_host.spec         PyInstaller spec for the native host helper
+build_macos.sh           macOS packaging script
+build_windows.bat        Windows packaging script
+installer_windows.iss    Inno Setup script for the Windows installer
+test_*.py                Current pytest-based checks in the repo root
+```
 
-### Testing
+### Tests
 
 ```bash
-# Run tests
-poetry run pytest
-
-# Run tests with GUI
-poetry run pytest --qt-no-capture
+pytest
 ```
+
+Several tests are device- and GUI-oriented, so a full run may require a connected Solo 2 and a working desktop environment.
 
 ## License
 
-[License to be determined]
-
-## Contributing
-
-[Contributing guidelines to be added]
+This project is licensed under the GNU General Public License v3.0. See `LICENSE`.

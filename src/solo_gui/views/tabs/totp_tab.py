@@ -4,6 +4,7 @@ Provides a comprehensive interface for managing TOTP credentials,
 inspired by Nitrokey's secrets-app implementation.
 """
 
+import os
 from typing import Optional, List
 import base64
 
@@ -13,10 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QGroupBox,
-    QTableWidget,
-    QTableWidgetItem,
     QPushButton,
-    QHeaderView,
     QMessageBox,
     QProgressBar,
     QComboBox,
@@ -27,12 +25,15 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QTextEdit,
+    QApplication,
+    QScrollArea,
+    QFrame,
     QTabWidget,
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont
 
-from solo_gui.models.device import SoloDevice
+from solo_gui.models.device import SoloDevice, firmware_supports_extended_applets
 from solo_gui.workers.totp_worker import (
     TotpWorker,
     Credential,
@@ -42,7 +43,247 @@ from solo_gui.workers.totp_worker import (
     OtpResult,
     SecretsAppStatus,
     FirmwareExtensionSpec,
+    encode_password_only_label,
 )
+from .secrets_tools_tab import SecretsToolsTab
+
+
+def _is_dark_mode() -> bool:
+    """Detect if dark mode is enabled."""
+    force_mode = os.environ.get("SOLOKEYSGUI_THEME", "").lower()
+    if force_mode == "dark":
+        return True
+    if force_mode == "light":
+        return False
+    color_scheme = QApplication.styleHints().colorScheme()
+    return color_scheme == Qt.ColorScheme.Dark
+
+
+def _get_card_colors() -> dict:
+    """Get color scheme for cards based on dark/light mode."""
+    if _is_dark_mode():
+        return {
+            'bg': '#2d2d2d',
+            'hover': '#3d3d3d',
+            'border': '#444',
+            'text': '#e0e0e0',
+            'secondary_text': '#aaa',
+        }
+    else:
+        return {
+            'bg': 'white',
+            'hover': '#f9f9f9',
+            'border': '#e0e0e0',
+            'text': '#222',
+            'secondary_text': '#666',
+        }
+
+
+class CredentialCard(QFrame):
+    """A card widget representing a single credential."""
+
+    generate_requested = Signal(object)  # Credential
+    delete_requested = Signal(object)    # Credential
+    copy_requested = Signal(object)      # Credential
+    load_password_requested = Signal(object)
+    edit_password_requested = Signal(object)
+    copy_login_requested = Signal(object)
+    copy_password_requested = Signal(object)
+
+    def __init__(self, credential: Credential, parent=None):
+        super().__init__(parent)
+        self._credential = credential
+        self._code: str = ""
+
+        colors = _get_card_colors()
+        self.setObjectName("CredentialCard")
+        self.setStyleSheet(f"""
+            CredentialCard {{
+                border: 1px solid {colors['border']};
+                border-radius: 6px;
+                background-color: {colors['bg']};
+            }}
+            CredentialCard:hover {{
+                border-color: {colors['border']};
+                background-color: {colors['hover']};
+            }}
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # --- Left side ---
+        left = QHBoxLayout()
+        left.setSpacing(6)
+
+        name_label = QLabel(credential.name)
+        name_font = QFont()
+        name_font.setBold(True)
+        name_font.setPointSize(11)
+        name_label.setFont(name_font)
+        left.addWidget(name_label)
+
+        badges = []
+        if credential.password_only:
+            badges.append("Password")
+        else:
+            if credential.is_otp:
+                badges.append(credential.kind_name)
+            elif credential.other:
+                badges.append(str(credential.other))
+            if credential.has_password_safe:
+                badges.append("Password")
+        if not badges:
+            badges.append("Secret")
+        for badge_text in badges:
+            type_badge = QLabel(badge_text)
+            type_badge.setStyleSheet(
+                "font-size: 10px; color: #555; padding: 1px 5px;"
+                " border: 1px solid #ccc; border-radius: 3px;"
+            )
+            left.addWidget(type_badge)
+
+        # Protection badge
+        if credential.protected or credential.touch_required:
+            parts = []
+            if credential.protected:
+                parts.append("PIN")
+            if credential.touch_required:
+                parts.append("Touch")
+            prot_badge = QLabel("+".join(parts))
+            prot_badge.setStyleSheet(
+                "font-size: 10px; color: #2196F3; padding: 1px 5px;"
+                " border: 1px solid #90caf9; border-radius: 3px;"
+            )
+            left.addWidget(prot_badge)
+
+        left.addStretch()
+
+        # --- Right side ---
+        right = QHBoxLayout()
+        right.setSpacing(4)
+
+        # Code button (clickable to copy)
+        self._code_btn = QPushButton("\u2500\u2500\u2500\u2500\u2500\u2500")
+        code_font = QFont("monospace")
+        code_font.setPointSize(13)
+        code_font.setBold(True)
+        self._code_btn.setFont(code_font)
+        self._code_btn.setMinimumWidth(130)
+        self._code_btn.setFlat(True)
+        self._code_btn.setStyleSheet(
+            "QPushButton { border: none; background: transparent; text-align: right; }"
+        )
+        self._code_btn.setCursor(Qt.ArrowCursor)
+        self._code_btn.clicked.connect(self._copy_code)
+        if credential.is_otp:
+            right.addWidget(self._code_btn)
+
+        # Copy symbol button
+        copy_btn = QPushButton("\u2398")
+        copy_btn.setFixedSize(28, 28)
+        copy_btn.setFlat(True)
+        copy_btn.setToolTip("Copy code")
+        copy_btn.setStyleSheet(
+            "QPushButton { color: #777; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background: #eee; }"
+        )
+        copy_btn.clicked.connect(self._copy_code)
+        if credential.is_otp:
+            right.addWidget(copy_btn)
+
+        # Generate button
+        self._gen_btn = QPushButton("\u25b6")
+        self._gen_btn.setFixedSize(28, 28)
+        self._gen_btn.setToolTip("Generate code")
+        self._gen_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #ddd; border-radius: 4px; }"
+            "QPushButton:hover { background: #f0f0f0; }"
+        )
+        self._gen_btn.clicked.connect(lambda: self.generate_requested.emit(self._credential))
+        if credential.is_otp:
+            right.addWidget(self._gen_btn)
+
+        if credential.has_password_safe:
+            button_style = (
+                "QPushButton { color: #777; border: none; border-radius: 4px; }"
+                "QPushButton:hover { background: #eee; }"
+            )
+
+            load_btn = QPushButton("\u21bb")
+            load_btn.setFixedSize(28, 28)
+            load_btn.setToolTip("Load password data")
+            load_btn.setStyleSheet(button_style)
+            load_btn.clicked.connect(lambda: self.load_password_requested.emit(self._credential))
+            right.addWidget(load_btn)
+
+            login_btn = QPushButton("\U0001f464")
+            login_btn.setFixedSize(28, 28)
+            login_btn.setToolTip("Copy login")
+            login_btn.setStyleSheet(button_style)
+            login_btn.clicked.connect(lambda: self.copy_login_requested.emit(self._credential))
+            right.addWidget(login_btn)
+
+            password_btn = QPushButton("\U0001f511")
+            password_btn.setFixedSize(28, 28)
+            password_btn.setToolTip("Copy password")
+            password_btn.setStyleSheet(button_style)
+            password_btn.clicked.connect(lambda: self.copy_password_requested.emit(self._credential))
+            right.addWidget(password_btn)
+
+            edit_btn = QPushButton("\u270e")
+            edit_btn.setFixedSize(28, 28)
+            edit_btn.setToolTip("Edit password data")
+            edit_btn.setStyleSheet(button_style)
+            edit_btn.clicked.connect(lambda: self.edit_password_requested.emit(self._credential))
+            right.addWidget(edit_btn)
+
+        # Delete button
+        del_btn = QPushButton("\u2715")
+        del_btn.setFixedSize(28, 28)
+        del_btn.setToolTip("Delete credential")
+        del_btn.setStyleSheet(
+            "QPushButton { color: #cc0000; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background: #ffeaea; }"
+        )
+        del_btn.clicked.connect(lambda: self.delete_requested.emit(self._credential))
+        right.addWidget(del_btn)
+
+        layout.addLayout(left, stretch=1)
+        layout.addLayout(right)
+
+    @property
+    def credential(self) -> Credential:
+        return self._credential
+
+    def set_code(self, code: str, countdown: int = 0) -> None:
+        self._code = code
+        display = self._format_code(code)
+        if countdown > 0:
+            display += f" ({countdown}s)"
+        self._code_btn.setText(display)
+        self._code_btn.setCursor(Qt.PointingHandCursor)
+        self._code_btn.setToolTip("Click to copy")
+
+    def clear_code(self) -> None:
+        self._code = ""
+        self._code_btn.setText("\u2500\u2500\u2500\u2500\u2500\u2500")
+        self._code_btn.setCursor(Qt.ArrowCursor)
+        self._code_btn.setToolTip("")
+
+    def _format_code(self, code: str) -> str:
+        """Format 6-digit as '123 456', 8-digit as '1234 5678'."""
+        if len(code) == 6:
+            return f"{code[:3]} {code[3:]}"
+        if len(code) == 8:
+            return f"{code[:4]} {code[4:]}"
+        return code
+
+    def _copy_code(self) -> None:
+        if self._code:
+            QApplication.clipboard().setText(self._code)
+            self.copy_requested.emit(self._credential)
 
 
 class SecretsPinDialog(QDialog):
@@ -94,7 +335,7 @@ class SecretsPinDialog(QDialog):
 
 
 class AddCredentialDialog(QDialog):
-    """Dialog for adding a new TOTP/Secrets credential."""
+    """Dialog for adding a new credential with optional OTP and password-safe data."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -105,81 +346,91 @@ class AddCredentialDialog(QDialog):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-
-        # Create tabs for different credential types
-        tabs = QTabWidget()
-
-        # TOTP tab
-        totp_widget = QWidget()
-        totp_layout = QFormLayout(totp_widget)
+        form = QFormLayout()
 
         self._name_edit = QLineEdit()
-        self._name_edit.setPlaceholderText("e.g., GitHub, Google")
-        totp_layout.addRow("Name:", self._name_edit)
+        self._name_edit.setPlaceholderText("e.g., github.com:manuel")
+        form.addRow("Name:", self._name_edit)
+
+        name_hint = QLabel(
+            "Best practice: include the site domain in the credential name, "
+            "for example github.com:manuel, so the browser extension can match it automatically."
+        )
+        name_hint.setWordWrap(True)
+        name_hint.setStyleSheet("color: #666; font-size: 12px;")
+        form.addRow("", name_hint)
+
+        self._otp_enabled = QCheckBox("Enable OTP")
+        self._otp_enabled.setChecked(True)
+        self._otp_enabled.toggled.connect(self._sync_sections)
+        form.addRow(self._otp_enabled)
+
+        self._password_enabled = QCheckBox("Enable Password Safe")
+        self._password_enabled.setChecked(False)
+        self._password_enabled.toggled.connect(self._sync_sections)
+        form.addRow(self._password_enabled)
+
+        layout.addLayout(form)
+
+        self._otp_group = QGroupBox("OTP")
+        otp_form = QFormLayout(self._otp_group)
 
         self._secret_edit = QLineEdit()
         self._secret_edit.setPlaceholderText("Base32 encoded secret")
-        totp_layout.addRow("Secret:", self._secret_edit)
+        otp_form.addRow("Secret:", self._secret_edit)
 
         self._type_combo = QComboBox()
         self._type_combo.addItem("TOTP (Time-based)", OtpKind.TOTP)
         self._type_combo.addItem("HOTP (Counter-based)", OtpKind.HOTP)
-        totp_layout.addRow("Type:", self._type_combo)
+        otp_form.addRow("Type:", self._type_combo)
 
         self._algorithm_combo = QComboBox()
         self._algorithm_combo.addItem("SHA1 (Most compatible)", Algorithm.SHA1)
         self._algorithm_combo.addItem("SHA256", Algorithm.SHA256)
         self._algorithm_combo.addItem("SHA512", Algorithm.SHA512)
-        totp_layout.addRow("Algorithm:", self._algorithm_combo)
+        otp_form.addRow("Algorithm:", self._algorithm_combo)
 
         self._digits_spin = QSpinBox()
         self._digits_spin.setRange(6, 8)
         self._digits_spin.setValue(6)
-        totp_layout.addRow("Digits:", self._digits_spin)
+        otp_form.addRow("Digits:", self._digits_spin)
 
         self._period_spin = QSpinBox()
         self._period_spin.setRange(15, 120)
         self._period_spin.setValue(30)
         self._period_spin.setSuffix(" seconds")
-        totp_layout.addRow("Period:", self._period_spin)
+        otp_form.addRow("Period:", self._period_spin)
+        layout.addWidget(self._otp_group)
 
-        tabs.addTab(totp_widget, "OTP Settings")
-
-        # Password Safe tab
-        pws_widget = QWidget()
-        pws_layout = QFormLayout(pws_widget)
-
+        self._password_group = QGroupBox("Password Safe")
+        password_form = QFormLayout(self._password_group)
         self._login_edit = QLineEdit()
-        self._login_edit.setPlaceholderText("Username (optional)")
-        pws_layout.addRow("Login:", self._login_edit)
+        self._login_edit.setPlaceholderText("Username or email")
+        password_form.addRow("Login:", self._login_edit)
 
         self._password_edit = QLineEdit()
-        self._password_edit.setPlaceholderText("Password (optional)")
         self._password_edit.setEchoMode(QLineEdit.Password)
-        pws_layout.addRow("Password:", self._password_edit)
+        self._password_edit.setPlaceholderText("Password")
+        password_form.addRow("Password:", self._password_edit)
 
-        self._metadata_edit = QTextEdit()
-        self._metadata_edit.setPlaceholderText("Notes or comments (optional)")
-        self._metadata_edit.setMaximumHeight(80)
-        pws_layout.addRow("Notes:", self._metadata_edit)
+        self._notes_edit = QTextEdit()
+        self._notes_edit.setMaximumHeight(120)
+        self._notes_edit.setPlaceholderText("Notes")
+        password_form.addRow("Notes:", self._notes_edit)
+        layout.addWidget(self._password_group)
 
-        tabs.addTab(pws_widget, "Password Safe")
-
-        # Security tab
-        sec_widget = QWidget()
-        sec_layout = QFormLayout(sec_widget)
+        security_group = QGroupBox("Security")
+        security_form = QFormLayout(security_group)
 
         self._touch_checkbox = QCheckBox("Require touch to generate code")
         self._touch_checkbox.setChecked(True)
-        sec_layout.addRow(self._touch_checkbox)
+        security_form.addRow(self._touch_checkbox)
 
         self._protected_checkbox = QCheckBox("PIN-protected (encrypted storage)")
         self._protected_checkbox.setChecked(False)
-        sec_layout.addRow(self._protected_checkbox)
-
-        tabs.addTab(sec_widget, "Security")
-
-        layout.addWidget(tabs)
+        security_form.addRow(self._protected_checkbox)
+        layout.addWidget(security_group)
+        self._sync_sections()
 
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -189,59 +440,117 @@ class AddCredentialDialog(QDialog):
 
     def _validate_and_accept(self):
         name = self._name_edit.text().strip()
-        secret = self._secret_edit.text().strip().replace(" ", "").upper()
 
         if not name:
             QMessageBox.warning(self, "Validation Error", "Name is required.")
             return
 
-        if not secret:
-            QMessageBox.warning(self, "Validation Error", "Secret is required.")
-            return
-
-        # Validate base32 secret
-        try:
-            base64.b32decode(secret, casefold=True)
-        except Exception:
+        if not self._otp_enabled.isChecked() and not self._password_enabled.isChecked():
             QMessageBox.warning(
                 self,
                 "Validation Error",
-                "Invalid secret. Must be a valid Base32 string.",
+                "Enable OTP, Password Safe, or both.",
             )
             return
 
+        if self._otp_enabled.isChecked():
+            secret = self._secret_edit.text().strip().replace(" ", "").upper()
+            if not secret:
+                QMessageBox.warning(self, "Validation Error", "Secret is required when OTP is enabled.")
+                return
+
+            try:
+                base64.b32decode(secret, casefold=True)
+            except Exception:
+                QMessageBox.warning(
+                    self,
+                    "Validation Error",
+                    "Invalid secret. Must be a valid Base32 string.",
+                )
+                return
+
         self.accept()
+
+    def _sync_sections(self) -> None:
+        otp_enabled = self._otp_enabled.isChecked()
+        password_enabled = self._password_enabled.isChecked()
+        self._otp_group.setVisible(otp_enabled)
+        self._password_group.setVisible(password_enabled)
+        self._touch_checkbox.setText(
+            "Require touch before use"
+            if password_enabled and not otp_enabled
+            else "Require touch before use/generation"
+        )
 
     def get_credential(self) -> Credential:
         """Get the credential from dialog inputs."""
         name = self._name_edit.text().strip()
-        otp_kind = self._type_combo.currentData()
-
-        login = self._login_edit.text().strip()
-        password = self._password_edit.text()
-        metadata = self._metadata_edit.toPlainText().strip()
+        otp_enabled = self._otp_enabled.isChecked()
 
         return Credential(
-            id=name.encode("utf-8"),
-            otp=otp_kind,
+            id=encode_password_only_label(name) if self._password_enabled.isChecked() and not otp_enabled else name.encode("utf-8"),
+            otp=self._type_combo.currentData() if otp_enabled else None,
             algorithm=self._algorithm_combo.currentData(),
             digits=self._digits_spin.value(),
             period=self._period_spin.value(),
+            login=self._login_edit.text().encode("utf-8") if self._password_enabled.isChecked() and self._login_edit.text() else None,
+            password=self._password_edit.text().encode("utf-8") if self._password_enabled.isChecked() and self._password_edit.text() else None,
+            metadata=self._notes_edit.toPlainText().encode("utf-8") if self._password_enabled.isChecked() and self._notes_edit.toPlainText() else None,
             touch_required=self._touch_checkbox.isChecked(),
             protected=self._protected_checkbox.isChecked(),
-            login=login.encode("utf-8") if login else None,
-            password=password.encode("utf-8") if password else None,
-            metadata=metadata.encode("utf-8") if metadata else None,
+            has_password_safe=self._password_enabled.isChecked(),
         )
 
     def get_secret(self) -> bytes:
         """Get the decoded secret bytes."""
-        secret = self._secret_edit.text().strip().replace(" ", "").upper()
-        return base64.b32decode(secret, casefold=True)
+        if self._otp_enabled.isChecked():
+            secret = self._secret_edit.text().strip().replace(" ", "").upper()
+            return base64.b32decode(secret, casefold=True)
+        return os.urandom(20)
+
+
+class EditPasswordDialog(QDialog):
+    """Edit password-safe fields for a credential."""
+
+    def __init__(self, credential: Credential, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit Credential: {credential.name}")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self._name = QLineEdit(credential.name)
+        form.addRow("Name:", self._name)
+
+        self._login = QLineEdit((credential.login or b"").decode("utf-8", errors="replace"))
+        form.addRow("Login:", self._login)
+
+        self._password = QLineEdit((credential.password or b"").decode("utf-8", errors="replace"))
+        self._password.setEchoMode(QLineEdit.Password)
+        form.addRow("Password:", self._password)
+
+        self._metadata = QTextEdit((credential.metadata or b"").decode("utf-8", errors="replace"))
+        self._metadata.setMaximumHeight(120)
+        form.addRow("Notes:", self._metadata)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[str, str, str, str]:
+        return (
+            self._name.text().strip(),
+            self._login.text(),
+            self._password.text(),
+            self._metadata.toPlainText(),
+        )
 
 
 class TotpTab(QWidget):
-    """TOTP/Secrets tab for managing 2FA credentials."""
+    """Unified Secrets tab for OTP and password-safe credentials."""
 
     totp_available = Signal(bool)  # emitted once per device connect after status probe
 
@@ -250,10 +559,15 @@ class TotpTab(QWidget):
         self._device: Optional[SoloDevice] = None
         self._worker: Optional[TotpWorker] = None
         self._worker_thread: Optional[QThread] = None
-        self._update_timer: Optional[QTimer] = None
         self._credentials: List[Credential] = []
         self._status: Optional[SecretsAppStatus] = None
         self._awaiting_touch_confirmation: bool = False
+        self._last_generate_credential: Optional[Credential] = None
+        self._pending_password_action: Optional[tuple[bytes, str]] = None
+        # Per-credential countdown state: keyed by credential id (bytes)
+        self._code_timers: dict = {}
+        self._code_remaining: dict = {}
+        self._credential_cards: dict = {}  # cred_id (bytes) → CredentialCard
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -274,7 +588,7 @@ class TotpTab(QWidget):
 
         # Status actions
         status_actions = QHBoxLayout()
-        self._check_status_button = QPushButton("Check Status")
+        self._check_status_button = QPushButton("Refresh")
         self._check_status_button.clicked.connect(self._check_status)
         status_actions.addWidget(self._check_status_button)
 
@@ -291,7 +605,7 @@ class TotpTab(QWidget):
         self._change_pin_button = QPushButton("Change PIN")
         self._change_pin_button.clicked.connect(self._change_pin)
         self._change_pin_button.setEnabled(False)
-        self._change_pin_button.setVisible(False)  # Hidden by default
+        self._change_pin_button.setVisible(False)
         status_actions.addWidget(self._change_pin_button)
 
         status_actions.addStretch()
@@ -299,59 +613,65 @@ class TotpTab(QWidget):
 
         layout.addWidget(status_group)
 
+        self._tabs = QTabWidget()
+
+        secrets_page = QWidget()
+        secrets_page_layout = QVBoxLayout(secrets_page)
+        secrets_page_layout.setContentsMargins(0, 0, 0, 0)
+
         # Credentials Group
-        creds_group = QGroupBox("OTP Credentials")
+        creds_group = QGroupBox("Secrets")
         creds_layout = QVBoxLayout(creds_group)
 
-        # Credentials table
-        self._creds_table = QTableWidget()
-        self._creds_table.setColumnCount(6)
-        self._creds_table.setHorizontalHeaderLabels(
-            ["Name", "Type", "Algorithm", "Digits", "Protected", "Code"]
-        )
-        self._creds_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._creds_table.setSelectionBehavior(QTableWidget.SelectRows)
+        filters = QHBoxLayout()
+        filters.addWidget(QLabel("Show:"))
+        self._filter_combo = QComboBox()
+        self._filter_combo.addItem("All")
+        self._filter_combo.addItem("OTP")
+        self._filter_combo.addItem("Password")
+        self._filter_combo.addItem("OTP + Password")
+        self._filter_combo.currentIndexChanged.connect(self._rebuild_cards)
+        filters.addWidget(self._filter_combo)
+        filters.addStretch()
+        creds_layout.addLayout(filters)
 
-        header = self._creds_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        # Scrollable card list
+        self._creds_scroll = QScrollArea()
+        self._creds_scroll.setWidgetResizable(True)
+        self._creds_scroll.setFrameShape(QFrame.NoFrame)
 
-        creds_layout.addWidget(self._creds_table)
+        self._creds_container = QWidget()
+        self._creds_layout = QVBoxLayout(self._creds_container)
+        self._creds_layout.setContentsMargins(2, 2, 2, 2)
+        self._creds_layout.setSpacing(4)
+        self._creds_layout.addStretch()
 
-        # Credential actions
+        self._creds_scroll.setWidget(self._creds_container)
+        creds_layout.addWidget(self._creds_scroll)
+
+        # Bottom bar: Add Credential
         actions = QHBoxLayout()
-
-        self._refresh_button = QPushButton("Refresh")
-        self._refresh_button.clicked.connect(self._refresh_credentials)
-        actions.addWidget(self._refresh_button)
-
         self._add_button = QPushButton("Add Credential")
+        self._add_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3; color: white; border: none;
+                padding: 6px 14px; border-radius: 4px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1976D2; }
+            QPushButton:disabled { background-color: #aaa; }
+        """)
         self._add_button.clicked.connect(self._add_credential)
         actions.addWidget(self._add_button)
-
-        self._delete_button = QPushButton("Delete")
-        self._delete_button.clicked.connect(self._delete_credential)
-        self._delete_button.setEnabled(False)
-        actions.addWidget(self._delete_button)
-
-        self._generate_button = QPushButton("Generate Code")
-        self._generate_button.clicked.connect(self._generate_code)
-        self._generate_button.setEnabled(False)
-        actions.addWidget(self._generate_button)
-
-        self._copy_button = QPushButton("Copy Code")
-        self._copy_button.clicked.connect(self._copy_code)
-        self._copy_button.setEnabled(False)
-        actions.addWidget(self._copy_button)
-
         actions.addStretch()
         creds_layout.addLayout(actions)
 
-        layout.addWidget(creds_group)
+        secrets_page_layout.addWidget(creds_group)
+
+        self._tools_tab = SecretsToolsTab()
+
+        self._tabs.addTab(secrets_page, "Credentials")
+        self._tabs.addTab(self._tools_tab, "Tools")
+        layout.addWidget(self._tabs)
 
         # Progress/Status bar
         progress_layout = QHBoxLayout()
@@ -365,15 +685,7 @@ class TotpTab(QWidget):
         progress_layout.addWidget(self._progress_bar)
         progress_layout.addStretch()
 
-        # Time remaining for current code
-        self._time_label = QLabel("")
-        self._time_label.setFont(QFont("monospace", 10))
-        progress_layout.addWidget(self._time_label)
-
         layout.addLayout(progress_layout)
-
-        # Connect selection change
-        self._creds_table.itemSelectionChanged.connect(self._on_selection_changed)
 
         # Disable controls initially
         self._set_controls_enabled(False)
@@ -382,16 +694,24 @@ class TotpTab(QWidget):
         """Set the current device."""
         self._device = device
         self._setup_worker()
+        self._tools_tab.set_device(device)
         self._set_controls_enabled(True)
+        self.totp_available.emit(self._should_show_tab())
         self._check_status()
 
     def clear_device(self) -> None:
         """Clear the current device."""
         self._device = None
         self._cleanup_worker()
+        self._tools_tab.clear_device()
         self._credentials = []
         self._status = None
-        self._creds_table.setRowCount(0)
+        self._credential_cards.clear()
+        # Remove all card widgets from layout (keep the trailing stretch)
+        while self._creds_layout.count() > 1:
+            item = self._creds_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
         self._status_label.setText("No device connected")
         self._pin_status_label.setText("")
         self._set_controls_enabled(False)
@@ -403,7 +723,6 @@ class TotpTab(QWidget):
 
         self._cleanup_worker()
 
-        # Create worker without threading - CTAPHID operations are quick
         self._worker = TotpWorker(self._device)
 
         # Connect signals
@@ -411,6 +730,8 @@ class TotpTab(QWidget):
         self._worker.credentials_loaded.connect(self._on_credentials_loaded)
         self._worker.credential_added.connect(self._on_credential_added)
         self._worker.credential_deleted.connect(self._on_credential_deleted)
+        self._worker.credential_data_loaded.connect(self._on_credential_data_loaded)
+        self._worker.credential_updated.connect(self._on_credential_updated)
         self._worker.otp_generated.connect(self._on_otp_generated)
         self._worker.pin_verified.connect(self._on_pin_verified)
         self._worker.pin_changed.connect(self._on_pin_changed)
@@ -419,10 +740,11 @@ class TotpTab(QWidget):
         self._worker.error_occurred.connect(self._on_error)
 
     def _cleanup_worker(self) -> None:
-        """Cleanup worker."""
-        if self._update_timer:
-            self._update_timer.stop()
-            self._update_timer = None
+        """Cleanup worker and all per-credential timers."""
+        for timer in self._code_timers.values():
+            timer.stop()
+        self._code_timers.clear()
+        self._code_remaining.clear()
 
         if self._worker_thread:
             self._worker_thread.quit()
@@ -434,28 +756,21 @@ class TotpTab(QWidget):
     def _set_controls_enabled(self, enabled: bool) -> None:
         """Enable/disable controls."""
         self._check_status_button.setEnabled(enabled)
-        self._refresh_button.setEnabled(enabled)
         self._add_button.setEnabled(enabled)
+
+    def _should_show_tab(self) -> bool:
+        if self._device is None or getattr(self._device.mode, "value", None) != "regular":
+            return False
+        info = self._device.get_info()
+        return firmware_supports_extended_applets(info.firmware_version)
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
         """Set busy state."""
         self._progress_bar.setVisible(busy)
         self._progress_label.setText(message if busy else "Ready")
-        self._progress_label.setStyleSheet("")  # Reset any styling
+        self._progress_label.setStyleSheet("")
         if busy:
             self._awaiting_touch_confirmation = False
-
-    def _on_selection_changed(self) -> None:
-        """Handle credential selection change."""
-        has_selection = bool(self._creds_table.selectedItems())
-        row = self._creds_table.currentRow()
-        is_otp = False
-        if row >= 0 and row < len(self._credentials):
-            is_otp = self._credentials[row].is_otp
-
-        self._delete_button.setEnabled(has_selection)
-        self._generate_button.setEnabled(has_selection and is_otp)
-        self._copy_button.setEnabled(has_selection)
 
     # =========================================================================
     # Actions
@@ -485,7 +800,6 @@ class TotpTab(QWidget):
             credential = dialog.get_credential()
             secret = dialog.get_secret()
 
-            # Check if trying to create PIN-protected credential
             if credential.protected:
                 if not self._worker.pin_is_set:
                     QMessageBox.warning(
@@ -496,23 +810,38 @@ class TotpTab(QWidget):
                     )
                     return
                 if not self._worker.pin_is_verified:
-                    # Prompt for PIN now so the worker can cache it and re-verify
-                    # immediately before sending the PUT command.
-                    self._verify_pin()
-                    if not self._worker.pin_is_verified:
-                        return
+                    QMessageBox.warning(
+                        self,
+                        "Unlock Required",
+                        "Cannot create PIN-protected credential: Device is locked.\n\n"
+                        "Please unlock the device using the 'Unlock' button first."
+                    )
+                    return
 
             self._set_busy(True, "Adding credential...")
             self._worker.add_credential(credential, secret)
 
-    def _delete_credential(self) -> None:
-        """Delete selected credential."""
-        row = self._creds_table.currentRow()
-        if row < 0 or row >= len(self._credentials):
+    def _generate_code_for(self, credential: Credential) -> None:
+        """Generate OTP code for a specific credential."""
+        if not self._worker or not credential.is_otp:
             return
 
-        credential = self._credentials[row]
+        touch_confirmed = (
+            self._awaiting_touch_confirmation
+            and self._last_generate_credential is not None
+            and self._last_generate_credential.id == credential.id
+        )
+        if touch_confirmed:
+            self._awaiting_touch_confirmation = False
+            self._last_generate_credential = None
+        else:
+            self._last_generate_credential = credential
 
+        self._set_busy(True, "Generating code...")
+        self._worker.generate_otp(credential, touch_confirmed=touch_confirmed)
+
+    def _delete_credential_for(self, credential: Credential) -> None:
+        """Delete a specific credential."""
         reply = QMessageBox.question(
             self,
             "Confirm Delete",
@@ -524,38 +853,35 @@ class TotpTab(QWidget):
             self._set_busy(True, "Deleting credential...")
             self._worker.delete_credential(credential)
 
-    def _generate_code(self) -> None:
-        """Generate OTP code for selected credential."""
-        row = self._creds_table.currentRow()
-        if row < 0 or row >= len(self._credentials):
+    def _load_password_for(self, credential: Credential, action: str = "load") -> None:
+        if not self._worker or not credential.has_password_safe:
             return
+        self._pending_password_action = (credential.id, action)
+        self._set_busy(True, "Loading password data...")
+        self._worker.load_credential_data(credential)
 
-        credential = self._credentials[row]
-        if not credential.is_otp:
+    def _copy_login_for(self, credential: Credential) -> None:
+        loaded = self._find_credential(credential.id)
+        if loaded and loaded.login is not None:
+            QApplication.clipboard().setText(loaded.login.decode("utf-8", errors="replace"))
+            self._progress_label.setText("Login copied to clipboard")
             return
+        self._load_password_for(credential, "copy_login")
 
-        if self._worker:
-            # Check if this is a confirmation after touch was required
-            touch_confirmed = self._awaiting_touch_confirmation
-            if touch_confirmed:
-                self._awaiting_touch_confirmation = False
-                self._set_busy(True, "Generating code...")
-            else:
-                self._set_busy(True, "Generating code...")
-
-            self._worker.generate_otp(credential, touch_confirmed=touch_confirmed)
-
-    def _copy_code(self) -> None:
-        """Copy current code to clipboard."""
-        row = self._creds_table.currentRow()
-        if row < 0:
+    def _copy_password_for(self, credential: Credential) -> None:
+        loaded = self._find_credential(credential.id)
+        if loaded and loaded.password is not None:
+            QApplication.clipboard().setText(loaded.password.decode("utf-8", errors="replace"))
+            self._progress_label.setText("Password copied to clipboard")
             return
+        self._load_password_for(credential, "copy_password")
 
-        code_item = self._creds_table.item(row, 5)
-        if code_item and code_item.text() and code_item.text() != "------":
-            from PySide6.QtWidgets import QApplication
-            QApplication.clipboard().setText(code_item.text())
-            self._progress_label.setText("Code copied to clipboard")
+    def _edit_password_for(self, credential: Credential) -> None:
+        loaded = self._find_credential(credential.id)
+        if loaded and any(value is not None for value in (loaded.login, loaded.password, loaded.metadata)):
+            self._open_edit_dialog(loaded)
+            return
+        self._load_password_for(credential, "edit")
 
     def _set_pin(self) -> None:
         """Set secrets app PIN."""
@@ -582,7 +908,6 @@ class TotpTab(QWidget):
         if not self._worker:
             return
 
-        # Dialog for changing PIN
         dialog = QDialog(self)
         dialog.setWindowTitle("Change Secrets PIN")
         dialog.setModal(True)
@@ -626,6 +951,51 @@ class TotpTab(QWidget):
             self._worker.change_pin(current_pin.text(), new_pin.text())
 
     # =========================================================================
+    # Per-credential countdown helpers
+    # =========================================================================
+
+    def _update_code_display(self, cred_id: bytes, code: str, countdown: int = 0) -> None:
+        """Update the code display on the card for the given credential id."""
+        card = self._credential_cards.get(cred_id)
+        if card:
+            if code == "------":
+                card.clear_code()
+            else:
+                card.set_code(code, countdown)
+
+    def _start_countdown(self, cred_id: bytes, code: str, remaining: int) -> None:
+        """Start (or restart) the per-credential countdown timer."""
+        if cred_id in self._code_timers:
+            self._code_timers[cred_id].stop()
+            del self._code_timers[cred_id]
+        self._code_remaining.pop(cred_id, None)
+
+        if remaining <= 0:
+            # HOTP or unknown period — show code without countdown
+            self._update_code_display(cred_id, code)
+            return
+
+        self._code_remaining[cred_id] = remaining
+        self._update_code_display(cred_id, code, remaining)
+
+        timer = QTimer(self)
+        self._code_timers[cred_id] = timer
+
+        def on_tick():
+            current = self._code_remaining.get(cred_id, 0) - 1
+            self._code_remaining[cred_id] = current
+            if current <= 0:
+                timer.stop()
+                self._code_timers.pop(cred_id, None)
+                self._code_remaining.pop(cred_id, None)
+                self._update_code_display(cred_id, "------")
+            else:
+                self._update_code_display(cred_id, code, current)
+
+        timer.timeout.connect(on_tick)
+        timer.start(1000)
+
+    # =========================================================================
     # Signal Handlers
     # =========================================================================
 
@@ -633,7 +1003,7 @@ class TotpTab(QWidget):
         """Handle status check result."""
         self._set_busy(False)
         self._status = status
-        self.totp_available.emit(status.supported)
+        self.totp_available.emit(self._should_show_tab())
 
         if status.supported:
             self._status_label.setText(
@@ -680,37 +1050,16 @@ class TotpTab(QWidget):
     def _on_credentials_loaded(self, credentials: List[Credential]) -> None:
         """Handle credentials loaded."""
         self._set_busy(False)
+
+        # Stop all existing countdown timers on refresh
+        for timer in self._code_timers.values():
+            timer.stop()
+        self._code_timers.clear()
+        self._code_remaining.clear()
+        self._credential_cards.clear()
+
         self._credentials = credentials
-
-        self._creds_table.setRowCount(0)
-        for i, cred in enumerate(credentials):
-            self._creds_table.insertRow(i)
-
-            self._creds_table.setItem(i, 0, QTableWidgetItem(cred.name))
-
-            # Type
-            if cred.otp:
-                type_str = str(cred.otp)
-            elif cred.other:
-                type_str = str(cred.other)
-            else:
-                type_str = "Password"
-            self._creds_table.setItem(i, 1, QTableWidgetItem(type_str))
-
-            # Algorithm
-            self._creds_table.setItem(i, 2, QTableWidgetItem(cred.algorithm.name))
-
-            # Digits
-            self._creds_table.setItem(i, 3, QTableWidgetItem(str(cred.digits)))
-
-            # Protected
-            protected_str = "Yes" if cred.protected else "No"
-            if cred.touch_required:
-                protected_str += " + Touch"
-            self._creds_table.setItem(i, 4, QTableWidgetItem(protected_str))
-
-            # Code placeholder
-            self._creds_table.setItem(i, 5, QTableWidgetItem("------"))
+        self._rebuild_cards()
 
     def _on_credential_added(self, success: bool, error: str) -> None:
         """Handle credential added."""
@@ -725,61 +1074,57 @@ class TotpTab(QWidget):
         """Handle credential deleted."""
         self._set_busy(False)
         if success:
-            QMessageBox.information(self, "Success", "Credential deleted")
+            self._progress_label.setText("Credential deleted")
             self._refresh_credentials()
         else:
             QMessageBox.critical(self, "Error", f"Failed to delete: {error}")
 
     def _on_otp_generated(self, result: OtpResult) -> None:
-        """Handle OTP generated."""
+        """Handle OTP generated — start per-credential countdown."""
         self._set_busy(False)
+        self._start_countdown(result.credential.id, result.code, result.remaining_seconds)
 
-        row = self._creds_table.currentRow()
-        if row >= 0:
-            code_item = QTableWidgetItem(result.code)
-            code_item.setFont(QFont("monospace", 12, QFont.Bold))
-            self._creds_table.setItem(row, 5, code_item)
+    def _on_card_copy(self, credential: Credential) -> None:
+        """Handle copy requested from a card."""
+        self._progress_label.setText("Code copied to clipboard")
 
-        # Update time display
-        self._update_time_display(result.remaining_seconds)
+    def _on_credential_data_loaded(self, credential: Credential) -> None:
+        self._set_busy(False)
+        self._merge_credential(credential)
+        pending = self._pending_password_action
+        self._pending_password_action = None
+        if not pending or pending[0] != credential.id:
+            self._progress_label.setText("Password data loaded")
+            return
 
-        # Start timer to update remaining time
-        if self._update_timer:
-            self._update_timer.stop()
-
-        self._update_timer = QTimer()
-        self._update_timer.timeout.connect(self._tick_time)
-        self._update_timer.start(1000)
-        self._remaining_seconds = result.remaining_seconds
-
-    def _update_time_display(self, seconds: int) -> None:
-        """Update the time remaining display."""
-        if seconds > 0:
-            self._time_label.setText(f"Valid for {seconds}s")
+        action = pending[1]
+        if action == "copy_login" and credential.login is not None:
+            QApplication.clipboard().setText(credential.login.decode("utf-8", errors="replace"))
+            self._progress_label.setText("Login copied to clipboard")
+        elif action == "copy_password" and credential.password is not None:
+            QApplication.clipboard().setText(credential.password.decode("utf-8", errors="replace"))
+            self._progress_label.setText("Password copied to clipboard")
+        elif action == "edit":
+            self._open_edit_dialog(credential)
         else:
-            self._time_label.setText("Expired")
+            self._progress_label.setText("Password data loaded")
 
-    def _tick_time(self) -> None:
-        """Timer tick for countdown."""
-        self._remaining_seconds -= 1
-        if self._remaining_seconds <= 0:
-            self._update_timer.stop()
-            self._time_label.setText("Expired - Generate new code")
-            # Clear code from table
-            row = self._creds_table.currentRow()
-            if row >= 0:
-                self._creds_table.setItem(row, 5, QTableWidgetItem("------"))
+    def _on_credential_updated(self, success: bool, message: str) -> None:
+        self._set_busy(False)
+        if success:
+            QMessageBox.information(self, "Updated", "Credential updated.")
+            self._refresh_credentials()
         else:
-            self._update_time_display(self._remaining_seconds)
+            QMessageBox.warning(self, "Update failed", message)
 
     def _on_pin_verified(self, success: bool, message: str) -> None:
         """Handle PIN verification result."""
         self._set_busy(False)
         if success:
             self._progress_label.setText("PIN verified - Secrets unlocked")
-            self._verify_pin_button.setEnabled(False)  # Disable after successful unlock
+            self._verify_pin_button.setEnabled(False)
             self._verify_pin_button.setVisible(False)
-            self._change_pin_button.setEnabled(True)  # Show change PIN after unlock
+            self._change_pin_button.setEnabled(True)
             self._change_pin_button.setVisible(True)
             self._refresh_credentials()
         else:
@@ -811,4 +1156,70 @@ class TotpTab(QWidget):
     def _on_error(self, error: str) -> None:
         """Handle worker error."""
         self._set_busy(False)
+        self._pending_password_action = None
         QMessageBox.critical(self, "Error", error)
+
+    def _rebuild_cards(self) -> None:
+        while self._creds_layout.count() > 1:
+            item = self._creds_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self._credential_cards.clear()
+
+        for cred in self._filtered_credentials():
+            card = CredentialCard(cred, self._creds_container)
+            card.generate_requested.connect(self._generate_code_for)
+            card.delete_requested.connect(self._delete_credential_for)
+            card.copy_requested.connect(self._on_card_copy)
+            card.load_password_requested.connect(lambda credential: self._load_password_for(credential, "load"))
+            card.edit_password_requested.connect(self._edit_password_for)
+            card.copy_login_requested.connect(self._copy_login_for)
+            card.copy_password_requested.connect(self._copy_password_for)
+            self._creds_layout.insertWidget(self._creds_layout.count() - 1, card)
+            self._credential_cards[cred.id] = card
+
+    def _filtered_credentials(self) -> List[Credential]:
+        mode = self._filter_combo.currentText()
+        if mode == "OTP":
+            return [cred for cred in self._credentials if cred.is_otp]
+        if mode == "Password":
+            return [cred for cred in self._credentials if cred.has_password_safe]
+        if mode == "OTP + Password":
+            return [cred for cred in self._credentials if cred.is_otp and cred.has_password_safe]
+        return list(self._credentials)
+
+    def _find_credential(self, cred_id: bytes) -> Optional[Credential]:
+        for credential in self._credentials:
+            if credential.id == cred_id:
+                return credential
+        return None
+
+    def _merge_credential(self, updated: Credential) -> None:
+        for index, credential in enumerate(self._credentials):
+            if credential.id == updated.id:
+                self._credentials[index] = updated
+                break
+        else:
+            self._credentials.append(updated)
+        self._rebuild_cards()
+
+    def _open_edit_dialog(self, credential: Credential) -> None:
+        if not self._worker:
+            return
+        dialog = EditPasswordDialog(credential, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        name, login, password, metadata = dialog.values()
+        self._set_busy(True, "Updating credential...")
+        self._worker.update_credential_data(
+            credential,
+            new_name=(
+                encode_password_only_label(name).decode("utf-8")
+                if credential.password_only and name and name != credential.name
+                else (name if name and name != credential.name else None)
+            ),
+            login=login,
+            password=password,
+            metadata=metadata,
+        )

@@ -1,15 +1,43 @@
 """Device models for SoloKeys GUI."""
 
+import logging
 import struct
+import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 import usb.core
 from fido2.ctap2 import Ctap2
 from fido2.hid import CtapHidDevice
+
+
+def _get_log_path() -> Path:
+    if sys.platform == "win32":
+        base = Path.home()
+        local_appdata = Path(
+            __import__("os").environ.get("LOCALAPPDATA", base / "AppData" / "Local")
+        )
+        data_dir = local_appdata / "solokeys-gui"
+    elif sys.platform == "darwin":
+        data_dir = Path.home() / "Library" / "Application Support" / "solokeys-gui"
+    else:
+        data_dir = Path.home() / ".local" / "share" / "solokeys-gui"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir / "solokeys-debug.log"
+
+
+_log_path = _get_log_path()
+logging.basicConfig(
+    filename=str(_log_path),
+    filemode="a",
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+_log = logging.getLogger("solo2device")
 
 
 def format_firmware_version(semver: Optional[str]) -> str:
@@ -35,6 +63,18 @@ def format_firmware_full(semver: Optional[str]) -> str:
         return f"{calver} ({semver})"
     except Exception:
         return semver
+
+
+def firmware_supports_extended_applets(semver: Optional[str]) -> bool:
+    """Return True for firmware versions that include Secrets, PIV, and OpenPGP."""
+    if not semver:
+        return False
+    try:
+        _major, minor, _patch = (int(x) for x in semver.split("."))
+        fw_date = date(2020, 1, 1) + timedelta(days=minor)
+        return fw_date >= date(2022, 8, 22)
+    except Exception:
+        return False
 
 
 class DeviceMode(Enum):
@@ -80,6 +120,10 @@ class FirmwareCapabilities:
     ctap2_uv: bool = False
     ctap2_rk: bool = False
     ctap2_up: bool = False
+    # PIV support - detected from CTAP2 or assumed for Solo 2
+    has_piv: bool = False
+    # OpenPGP support - same presence assumption as PIV
+    has_openpgp: bool = False
     # Metadata
     variant: str = ""
     firmware_version: Optional[str] = None
@@ -113,6 +157,14 @@ class SoloDevice(ABC):
         """Check if device is still connected."""
         pass
 
+    def open_hid_device(self):
+        """Open a fresh HID handle if the device supports it."""
+        return None
+
+    def open_ctap2(self) -> Optional[Ctap2]:
+        """Open a fresh CTAP2 connection if the device supports it."""
+        return None
+
 
 class Solo2Device(SoloDevice):
     """SoloKeys Solo 2 device implementation."""
@@ -130,60 +182,52 @@ class Solo2Device(SoloDevice):
     def __init__(self, path: str, mode: DeviceMode):
         super().__init__(path, mode)
         self._usb_device: Optional[usb.core.Device] = None
-        self._hid_device: Optional[CtapHidDevice] = None
+        self._hid_path: Optional[bytes] = None  # raw bytes path; handle closed after connect()
         self._variant: Optional[str] = None  # "Hacker" or "Secure"
         self._firmware_version: Optional[str] = None  # semver e.g. "2.964.0", cached at connect
         self._capabilities: Optional[FirmwareCapabilities] = None
+        self._device_uuid: Optional[str] = None
 
     def connect(self) -> bool:
         """Connect to the Solo 2 device."""
         try:
             if self.mode == DeviceMode.REGULAR:
-                # For regular mode, find a working CTAP HID device
-                for hid_device in CtapHidDevice.list_devices():
+                _log.debug("connect() REGULAR path=%s", self.path)
+                matched_hid = self.open_hid_device()
+                if matched_hid is not None:
+                    desc = matched_hid.descriptor
+                    version = self._get_firmware_version_from_hid(matched_hid)
+                    device_uuid = self._get_uuid_from_hid(matched_hid)
+                    variant = "Hacker"
+                    ctap_info = None
                     try:
-                        # Test CTAP2 briefly to identify device, but don't store the CTAP2 object
-                        # to avoid thread-safety issues. Workers will open their own connections.
-                        ctap = Ctap2(hid_device)
-                        info = ctap.info
-                        aaguid_prefix = info.aaguid.hex()[:8] if info.aaguid else ''
-                        if aaguid_prefix in self.SOLOKEYS_AAGUIDS:
-                            variant = self.SOLOKEYS_AAGUIDS[aaguid_prefix]
-                        else:
-                            # Unknown AAGUID (e.g. dev/custom firmware) — accept if the
-                            # device responds to the Solo2 admin VERSION command.
-                            version_probe = self._get_firmware_version_from_hid(hid_device)
-                            if not version_probe:
-                                continue
-                            variant = "Hacker"
-                        # Don't store CTAP2 object - only HID device
-                        # This prevents thread-safety issues
-                        self._hid_device = hid_device
-                        self._variant = variant
-                        self.status = DeviceStatus.CONNECTED
-                        self._firmware_version = self._get_firmware_version()
-                        self._capabilities = self._detect_capabilities()
-                        return True
-                    except Exception:
-                        continue
+                        ctap = Ctap2(matched_hid)
+                        ctap_info = ctap.info
+                        aaguid_prefix = ctap_info.aaguid.hex()[:8] if ctap_info.aaguid else ""
+                        variant = self.SOLOKEYS_AAGUIDS.get(aaguid_prefix, "Hacker")
+                    except Exception as e:
+                        _log.debug("connect() CTAP2 GetInfo failed (non-fatal): %s", e)
 
-                # If full Ctap2 fails, try to use just HID device for basic operations
-                # This handles cases where CTAP2 isn't working but vendor commands are
-                for hid_device in CtapHidDevice.list_devices():
-                    try:
-                        # Test if we can at least get version via vendor command
-                        version = self._get_firmware_version_from_hid(hid_device)
-                        if version:
-                            self._hid_device = hid_device
-                            self._variant = "Hacker"  # Assume hacker firmware
-                            self._firmware_version = version
-                            self.status = DeviceStatus.CONNECTED
-                            self._capabilities = self._detect_capabilities()
-                            return True
-                    except Exception:
-                        continue
+                    self._hid_path = getattr(desc, "path", None)
+                    self._device_uuid = device_uuid
+                    if device_uuid:
+                        self.path = f"uuid:{device_uuid}"
+                    elif self._hid_path is not None:
+                        self.path = f"hid:{self._hid_path!r}"
+                    self._variant = variant
+                    self.status = DeviceStatus.CONNECTED
+                    self._firmware_version = version
+                    self._capabilities = self._detect_capabilities(ctap_info=ctap_info)
+                    _log.debug(
+                        "connect() SUCCESS variant=%s fw=%s uuid=%s path=%r",
+                        variant,
+                        version,
+                        device_uuid,
+                        self._hid_path,
+                    )
+                    return True
 
-                # No Solo2 device found
+                _log.debug("connect() FAILED: no matching device found")
                 self.status = DeviceStatus.ERROR
                 return False
 
@@ -208,7 +252,7 @@ class Solo2Device(SoloDevice):
     def disconnect(self) -> None:
         """Disconnect from the device."""
         self._usb_device = None
-        self._hid_device = None
+        self._hid_path = None
         self._capabilities = None
         self.status = DeviceStatus.DISCONNECTED
 
@@ -240,18 +284,8 @@ class Solo2Device(SoloDevice):
         )
 
     def _get_firmware_version(self) -> Optional[str]:
-        """Query firmware version via Solo2 admin app VERSION command (0x61).
-
-        The 4-byte response is a big-endian u32 packed as:
-          bits 31:22 — major (10 bits)
-          bits 21:6  — minor (16 bits, days since 2020-01-01)
-          bits  5:0  — patch  (6 bits)
-
-        This matches lpc55::secure_binary::Version::from([u8; 4]) in solo2-cli.
-        """
-        if not self._hid_device:
-            return None
-        return self._get_firmware_version_from_hid(self._hid_device)
+        """Return the firmware version cached at connect time."""
+        return self._firmware_version
 
     def _get_firmware_version_from_hid(self, hid_device) -> Optional[str]:
         """Query firmware version from a specific HID device."""
@@ -266,20 +300,47 @@ class Solo2Device(SoloDevice):
             return f"{major}.{minor}.{patch}"
         except Exception:
             return None
-            return None
+
+    def _get_uuid_from_hid(self, hid_device) -> Optional[str]:
+        """Query UUID from a specific HID device."""
         try:
-            resp = self._hid_device.call(0x61, b'')
-            if len(resp) < 4:
+            resp = hid_device.call(0x62, b"")
+            if len(resp) < 16:
                 return None
-            version = struct.unpack('>I', resp[:4])[0]
-            major = version >> 22
-            minor = (version >> 6) & ((1 << 16) - 1)
-            patch = version & ((1 << 6) - 1)
-            return f"{major}.{minor}.{patch}"
+            uuid_hex = resp[:16].hex()
+            return (
+                f"{uuid_hex[:8]}-{uuid_hex[8:12]}-{uuid_hex[12:16]}-"
+                f"{uuid_hex[16:20]}-{uuid_hex[20:32]}"
+            )
         except Exception:
             return None
 
-    def _detect_capabilities(self) -> FirmwareCapabilities:
+    def _get_firmware_version_pcsc_reader(self, reader) -> Optional[str]:
+        """Query firmware version via admin applet over raw pyscard (no FIDO AID selected)."""
+        ADMIN_AID = [0xA0, 0x00, 0x00, 0x08, 0x47, 0x00, 0x00, 0x00, 0x01]
+        try:
+            conn = reader.createConnection()
+            conn.connect()
+            try:
+                select = [0x00, 0xA4, 0x04, 0x00, len(ADMIN_AID)] + ADMIN_AID
+                resp, sw1, sw2 = conn.transmit(select)
+                if (sw1, sw2) != (0x90, 0x00):
+                    return None
+                resp, sw1, sw2 = conn.transmit([0x00, 0x61, 0x00, 0x00, 0x00])
+                if (sw1, sw2) != (0x90, 0x00) or len(resp) < 4:
+                    return None
+                version_int = struct.unpack('>I', bytes(resp[:4]))[0]
+                major = version_int >> 22
+                minor = (version_int >> 6) & ((1 << 16) - 1)
+                patch = version_int & ((1 << 6) - 1)
+                return f"{major}.{minor}.{patch}"
+            finally:
+                conn.disconnect()
+        except Exception as e:
+            _log.debug("_get_firmware_version_pcsc_reader: %s", e)
+            return None
+
+    def _detect_capabilities(self, ctap_info=None) -> FirmwareCapabilities:
         """Probe device capabilities once at connect time."""
         caps = FirmwareCapabilities(
             variant=self._variant or "",
@@ -294,6 +355,27 @@ class Solo2Device(SoloDevice):
             caps.has_uuid = True
             caps.has_locked = True
 
+        # Detect PIV support from CTAP2 info or assume true for Solo 2 devices
+        # Solo 2 firmware typically includes PIV applet
+        if ctap_info is not None:
+            # Check CTAP2 extensions for PIV indication
+            extensions = getattr(ctap_info, 'extensions', []) or []
+            if 'piv' in extensions:
+                caps.has_piv = True
+            elif self._variant in ('Hacker', 'Secure'):
+                # Solo 2 devices with official firmware have PIV
+                caps.has_piv = True
+        elif self._variant in ('Hacker', 'Secure'):
+            # Assume PIV support for Solo 2 devices
+            caps.has_piv = True
+
+        # OpenPGP: same presence assumption as PIV
+        if ctap_info is not None:
+            if self._variant in ('Hacker', 'Secure'):
+                caps.has_openpgp = True
+        elif self._variant in ('Hacker', 'Secure'):
+            caps.has_openpgp = True
+
         # Capabilities are probed during connect() and cached
         # Don't access CTAP2 device here to avoid thread conflicts
 
@@ -304,11 +386,16 @@ class Solo2Device(SoloDevice):
         """Get probed firmware capabilities."""
         return self._capabilities
 
+    @property
+    def device_uuid(self) -> Optional[str]:
+        """Stable device UUID if the admin app is available."""
+        return self._device_uuid
+
     def is_alive(self) -> bool:
         """Check if device is still connected."""
-        # For regular mode, just check if we have the HID device reference
+        # For regular mode, rely on DeviceMonitor's health checks (no HID probe here)
         if self.mode == DeviceMode.REGULAR:
-            return self._hid_device is not None and self.status == DeviceStatus.CONNECTED
+            return self.status == DeviceStatus.CONNECTED
 
         # For bootloader mode, check USB device
         try:
@@ -321,21 +408,60 @@ class Solo2Device(SoloDevice):
         return False
 
     @property
-    def hid_device_path(self) -> Optional[str]:
-        """Get the HID device path (e.g., /dev/hidraw2) for opening device in worker threads."""
-        if self._hid_device is not None:
-            return self._hid_device.descriptor.path
+    def hid_device_path(self) -> Optional[bytes]:
+        """Get the device path stored at connect time."""
+        return self._hid_path
+
+    def _matches_hid_device(self, hid_device) -> bool:
+        """Return True if the HID device matches this Solo 2 device."""
+        desc = getattr(hid_device, "descriptor", None)
+        if not desc:
+            return False
+        desc_path = getattr(desc, "path", None)
+
+        if self._hid_path is not None and desc_path == self._hid_path:
+            return True
+
+        if self._device_uuid:
+            return self._get_uuid_from_hid(hid_device) == self._device_uuid
+
+        if self.path.startswith("uuid:"):
+            return self._get_uuid_from_hid(hid_device) == self.path.split(":", 1)[1]
+
+        if self.path.startswith("hid:"):
+            return self.path == f"hid:{desc_path!r}"
+
+        return False
+
+    def open_hid_device(self):
+        """Open a fresh HID device handle for this device."""
+        fallback = None
+        allow_fallback = self._device_uuid is None and not self.path.startswith("uuid:")
+        for hid_device in CtapHidDevice.list_devices():
+            desc = getattr(hid_device, "descriptor", None)
+            if not desc:
+                continue
+            if allow_fallback and fallback is None:
+                version = self._get_firmware_version_from_hid(hid_device)
+                if version:
+                    fallback = hid_device
+            if self._matches_hid_device(hid_device):
+                self._hid_path = getattr(desc, "path", None)
+                return hid_device
+        if allow_fallback and fallback is not None:
+            desc = getattr(fallback, "descriptor", None)
+            self._hid_path = getattr(desc, "path", None)
+            if self._device_uuid is None:
+                self._device_uuid = self._get_uuid_from_hid(fallback)
+            return fallback
         return None
-    
+
     def open_ctap2(self) -> Optional[Ctap2]:
         """Open a fresh CTAP2 connection. Caller is responsible for thread-safety."""
-        if self._hid_device is None:
-            return None
         try:
-            # Open a new CTAP2 connection using the stored HID device info
-            for hid_dev in CtapHidDevice.list_devices():
-                if hid_dev.descriptor.path == self._hid_device.descriptor.path:
-                    return Ctap2(hid_dev)
+            hid_device = self.open_hid_device()
+            if hid_device is None:
+                return None
+            return Ctap2(hid_device)
         except Exception:
-            pass
-        return None
+            return None
