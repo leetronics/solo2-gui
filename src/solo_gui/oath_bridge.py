@@ -179,6 +179,14 @@ class OATHBridge:
             raise OATHError("PIN blocked")
         raise OATHError(f"APDU error: 0x{sw:04X}")
 
+    @staticmethod
+    def _name_candidates(name: str) -> list[str]:
+        """Return plausible stored names for a browser-facing credential name."""
+        candidates = [name]
+        if not is_password_only_label(name):
+            candidates.append(encode_password_only_label(name))
+        return candidates
+
     def _send_apdu(self, ins: int, p1: int = 0, p2: int = 0, data: bytes = b'') -> bytes:
         """Send a single APDU and return the payload (no more-data handling).
 
@@ -370,28 +378,48 @@ class OATHBridge:
             return {'success': False, 'error': str(e)}
 
     def delete_credential(self, name: str) -> dict:
-        data = self._build_tlv(TAG_NAME, name.encode('utf-8'))
-        try:
-            self._send_apdu(INS_DELETE, 0x00, 0x00, data)
-            return {'success': True}
-        except OATHError as e:
-            return {'success': False, 'error': str(e)}
+        last_error: OATHError | None = None
+        for candidate in self._name_candidates(name):
+            data = self._build_tlv(TAG_NAME, candidate.encode('utf-8'))
+            try:
+                self._send_apdu(INS_DELETE, 0x00, 0x00, data)
+                return {'success': True}
+            except OATHError as e:
+                last_error = e
+                if "0x6A82" not in str(e) or candidate == self._name_candidates(name)[-1]:
+                    break
+        return {'success': False, 'error': str(last_error) if last_error else 'Delete failed'}
 
     def get_password_entry(self, name: str) -> dict:
-        data = self._build_tlv(TAG_NAME, name.encode('utf-8'))
-        try:
-            payload = self._send_apdu_all(INS_GET_CREDENTIAL, 0x00, 0x00, data)
-        except OATHTouchRequired:
-            return {'success': False, 'error': 'TOUCH_REQUIRED'}
-        except OATHPINRequired:
-            return {'success': False, 'error': 'PIN_REQUIRED'}
-        except OATHError as e:
-            return {'success': False, 'error': str(e)}
+        payload = None
+        last_error: Exception | None = None
+        selected_name = name
+        for candidate in self._name_candidates(name):
+            data = self._build_tlv(TAG_NAME, candidate.encode('utf-8'))
+            try:
+                payload = self._send_apdu_all(INS_GET_CREDENTIAL, 0x00, 0x00, data)
+                selected_name = candidate
+                break
+            except OATHTouchRequired:
+                return {'success': False, 'error': 'TOUCH_REQUIRED'}
+            except OATHPINRequired:
+                return {'success': False, 'error': 'PIN_REQUIRED'}
+            except OATHError as e:
+                last_error = e
+                if "0x6A82" not in str(e) or candidate == self._name_candidates(name)[-1]:
+                    return {'success': False, 'error': str(e)}
 
-        entry = {'name': name, 'login': '', 'password': '', 'metadata': ''}
+        entry = {
+            'name': strip_password_only_label(selected_name),
+            'login': '',
+            'password': '',
+            'metadata': '',
+        }
         for tag, value in self._parse_tlv(payload):
             if tag == TAG_NAME:
-                entry['name'] = value.decode('utf-8', errors='replace')
+                entry['name'] = strip_password_only_label(
+                    value.decode('utf-8', errors='replace')
+                )
             elif tag == TAG_PWS_LOGIN:
                 entry['login'] = value.decode('utf-8', errors='replace')
             elif tag == TAG_PWS_PASSWORD:
@@ -409,21 +437,31 @@ class OATHBridge:
         password: str | None = None,
         metadata: str | None = None,
     ) -> dict:
-        data = self._build_tlv(TAG_NAME, name.encode('utf-8'))
-        if new_name:
-            data += self._build_tlv(TAG_NAME, new_name.encode('utf-8'))
-        if login is not None:
-            data += self._build_tlv(TAG_PWS_LOGIN, login.encode('utf-8'))
-        if password is not None:
-            data += self._build_tlv(TAG_PWS_PASSWORD, password.encode('utf-8'))
-        if metadata is not None:
-            data += self._build_tlv(TAG_PWS_METADATA, metadata.encode('utf-8'))
-        try:
-            self._send_apdu(INS_UPDATE_CREDENTIAL, 0x00, 0x00, data)
-            return {'success': True}
-        except OATHTouchRequired:
-            return {'success': False, 'error': 'TOUCH_REQUIRED'}
-        except OATHPINRequired:
-            return {'success': False, 'error': 'PIN_REQUIRED'}
-        except OATHError as e:
-            return {'success': False, 'error': str(e)}
+        last_error: Exception | None = None
+        for candidate in self._name_candidates(name):
+            data = self._build_tlv(TAG_NAME, candidate.encode('utf-8'))
+            if new_name:
+                target_name = (
+                    encode_password_only_label(new_name)
+                    if is_password_only_label(candidate)
+                    else new_name
+                )
+                data += self._build_tlv(TAG_NAME, target_name.encode('utf-8'))
+            if login is not None:
+                data += self._build_tlv(TAG_PWS_LOGIN, login.encode('utf-8'))
+            if password is not None:
+                data += self._build_tlv(TAG_PWS_PASSWORD, password.encode('utf-8'))
+            if metadata is not None:
+                data += self._build_tlv(TAG_PWS_METADATA, metadata.encode('utf-8'))
+            try:
+                self._send_apdu(INS_UPDATE_CREDENTIAL, 0x00, 0x00, data)
+                return {'success': True}
+            except OATHTouchRequired:
+                return {'success': False, 'error': 'TOUCH_REQUIRED'}
+            except OATHPINRequired:
+                return {'success': False, 'error': 'PIN_REQUIRED'}
+            except OATHError as e:
+                last_error = e
+                if "0x6A82" not in str(e) or candidate == self._name_candidates(name)[-1]:
+                    return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': str(last_error) if last_error else 'Update failed'}
