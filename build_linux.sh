@@ -99,6 +99,9 @@ APPIMAGE_DIR="$(mktemp -d)"
 # Prepare AppDir structure
 mkdir -p "${APPIMAGE_DIR}/usr/bin"
 cp -r "dist/${APP_NAME}/"* "${APPIMAGE_DIR}/usr/bin/"
+mkdir -p "${APPIMAGE_DIR}/usr/lib/gio/modules"
+mkdir -p "${APPIMAGE_DIR}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+touch "${APPIMAGE_DIR}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
 
 # Create desktop file
 cat > "${APPIMAGE_DIR}/SoloKeys GUI.desktop" <<EOF
@@ -120,6 +123,24 @@ cat > "${APPIMAGE_DIR}/AppRun" <<'EOF'
 #!/usr/bin/env bash
 SELF="$(readlink -f "$0")"
 HERE="$(dirname "$SELF")"
+
+# Avoid loading host GIO/GVFS modules against bundled GLib/Qt libraries.
+# This is a common source of AppImage instability on newer Linux desktops.
+unset GIO_EXTRA_MODULES
+unset GTK_PATH
+unset GTK_EXE_PREFIX
+unset GTK_DATA_PREFIX
+unset GTK_IM_MODULE_FILE
+unset QT_PLUGIN_PATH
+unset QML2_IMPORT_PATH
+unset QT_QPA_PLATFORMTHEME
+export GIO_MODULE_DIR="${HERE}/usr/lib/gio/modules"
+export GDK_PIXBUF_MODULEDIR="${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+export GDK_PIXBUF_MODULE_FILE="${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+export GIO_USE_VFS=local
+export GVFS_DISABLE_FUSE=1
+export GTK_A11Y=none
+
 exec "${HERE}/usr/bin/SoloKeys GUI" "$@"
 EOF
 chmod +x "${APPIMAGE_DIR}/AppRun"

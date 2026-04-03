@@ -30,7 +30,7 @@ cd solo2-gui
 python3 -m venv .venv
 source .venv/bin/activate
 
-# On Linux, install libpcsclite-dev first so pyscard can build successfully.
+# On Linux, install the system packages from the Linux section below first.
 pip install -r requirements.txt
 
 PYTHONPATH=src python -m solo_gui.main
@@ -44,13 +44,15 @@ If you are developing `solo2-python` and this GUI side by side, the GUI source t
 
 ### Linux
 
+For Linux, the recommended deployment path is a normal checkout plus a virtualenv. The AppImage build remains available, but if the desktop environment or bundled GLib stack causes trouble, run the application directly from a cloned repo instead.
+
 Install `libusb` and, if you want smartcard-backed features, `pcscd` plus the PC/SC development headers.
 
 Example for Debian/Ubuntu:
 
 ```bash
-sudo apt install -y libusb-1.0-0
-# Optional:
+sudo apt install -y python3-venv libusb-1.0-0
+# Optional smartcard support:
 sudo apt install -y pcscd libpcsclite-dev
 ```
 
@@ -66,6 +68,27 @@ sudo usermod -aG plugdev "$USER"
 ```
 
 Log out and back in after changing group membership.
+
+To install and run the GUI directly from a checkout:
+
+```bash
+git clone git@github.com:leetronics/solo2-gui.git
+cd solo2-gui
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+PYTHONPATH=src python -m solo_gui.main
+```
+
+If you want a packaged Linux artifact anyway, the AppImage build path is still available:
+
+```bash
+./build_linux.sh
+```
+
+The AppImage is written to `dist/`. The source-based path above is the simpler fallback for users and testers if the AppImage does not behave correctly on a given distro or desktop stack.
 
 ### macOS
 
