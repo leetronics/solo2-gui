@@ -30,6 +30,27 @@ class DeviceMonitor(QObject):
         self._missing_scans: Dict[str, int] = {}
         self._disconnect_grace_scans = 3 if sys.platform == "win32" else 1
 
+    def _update_polling_state(self) -> None:
+        """Poll only while no device is connected.
+
+        Once we have a device, rely on the USB monitor for hotplug events.
+        This avoids reopening CCID readers in the background while the GUI
+        and browser bridge are actively using the token.
+        """
+        if self._devices:
+            if self._poll_timer.isActive():
+                _log.debug(
+                    "_update_polling_state stopping background polling while connected"
+                )
+                self._poll_timer.stop()
+            return
+
+        if self._usb_monitor is not None and not self._poll_timer.isActive():
+            _log.debug(
+                "_update_polling_state starting background polling with no device connected"
+            )
+            self._poll_timer.start()
+
     def start_monitoring(self) -> None:
         """Start monitoring for device changes."""
         # Create USB monitor for SoloKeys devices
@@ -47,7 +68,7 @@ class DeviceMonitor(QObject):
 
         # Initial scan, then keep polling every second on the main thread
         self._scan_devices()
-        self._poll_timer.start()
+        self._update_polling_state()
 
     def stop_monitoring(self) -> None:
         """Stop monitoring for device changes."""
@@ -69,6 +90,7 @@ class DeviceMonitor(QObject):
                         self._devices[descriptor.id] = device
                         self._missing_scans.pop(descriptor.id, None)
                         self.device_connected.emit(device)
+                        self._update_polling_state()
                     break
         except Exception:
             pass
@@ -86,6 +108,7 @@ class DeviceMonitor(QObject):
         self._missing_scans.pop(device_id, None)
         device.disconnect()
         self.device_disconnected.emit(getattr(device, "path", device_id))
+        self._update_polling_state()
 
     def _scan_devices(self) -> None:
         """Scan for connected SoloKeys devices."""
@@ -143,6 +166,8 @@ class DeviceMonitor(QObject):
                 self._devices[descriptor.id] = device
                 self._missing_scans.pop(descriptor.id, None)
                 self.device_connected.emit(device)
+
+        self._update_polling_state()
 
     def get_devices(self) -> List[SoloDevice]:
         """Get all connected devices."""
