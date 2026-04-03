@@ -6,8 +6,6 @@
 set -euo pipefail
 
 APP_NAME="SoloKeys GUI"
-APP_VERSION=$(grep -oP '^version\s*=\s*"\K[^"]+' pyproject.toml)
-DMG_NAME="SoloKeys GUI-${APP_VERSION}.dmg"
 
 # ---------------------------------------------------------------------------
 # 1. Check required tools
@@ -29,6 +27,11 @@ else
     echo "Error: Python 3.10+ required (found ${PYTHON_VERSION})." >&2
     exit 1
 fi
+
+APP_VERSION=$(
+    python3 -c 'import pathlib, re, sys; text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8"); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); sys.exit("Error: Could not determine app version from pyproject.toml") if match is None else print(match.group(1))'
+)
+DMG_NAME="SoloKeys GUI-${APP_VERSION}.dmg"
 
 # ---------------------------------------------------------------------------
 # 2. Detect libusb

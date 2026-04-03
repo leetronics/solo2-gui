@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # build_linux.sh — Build SoloKeys GUI as an AppImage
 #
-# Requirements: Ubuntu 22.04+, Python 3.10+, libusb-1.0-0
+# Requirements: Ubuntu 22.04+, Python 3.10+, libusb-1.0-0, libpcsclite-dev
 # Usage: ./build_linux.sh
 set -euo pipefail
 
 APP_NAME="SoloKeys GUI"
-APP_VERSION=$(grep -oP '^version\s*=\s*"\K[^"]+' pyproject.toml)
 ARCH="$(uname -m)"
 
 # ---------------------------------------------------------------------------
@@ -25,8 +24,21 @@ else
     exit 1
 fi
 
+APP_VERSION=$(
+    python3 -c 'import pathlib, re, sys; text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8"); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); sys.exit("Error: Could not determine app version from pyproject.toml") if match is None else print(match.group(1))'
+)
+
 # ---------------------------------------------------------------------------
-# 2. Install Python dependencies
+# 2. Check PCSC development headers needed by pyscard
+# ---------------------------------------------------------------------------
+if [[ ! -f "/usr/include/PCSC/winscard.h" && ! -f "/usr/local/include/PCSC/winscard.h" ]]; then
+    echo "Error: PCSC development headers not found." >&2
+    echo "Install with: sudo apt install libpcsclite-dev" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Install Python dependencies
 # ---------------------------------------------------------------------------
 echo ""
 echo "Installing Python dependencies..."
@@ -34,14 +46,14 @@ pip3 install -r requirements.txt
 pip3 install "pyinstaller>=6.2.0"
 
 # ---------------------------------------------------------------------------
-# 3. Clean previous build artifacts
+# 4. Clean previous build artifacts
 # ---------------------------------------------------------------------------
 echo ""
 echo "Cleaning previous build..."
 rm -rf build dist
 
 # ---------------------------------------------------------------------------
-# 4. Run PyInstaller for main app
+# 5. Run PyInstaller for main app
 # ---------------------------------------------------------------------------
 echo ""
 echo "Running PyInstaller..."
