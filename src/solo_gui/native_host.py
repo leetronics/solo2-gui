@@ -53,8 +53,13 @@ def send_message(msg):
 
 # ---------- Path 1: GUI socket ----------
 
-def _try_gui_socket(msg, retries: int = 2) -> dict | None:
-    """Forward msg to the solokeys-gui socket.  Returns None on any failure."""
+def _try_gui_socket(msg, retries: int = 2) -> tuple[dict | None, str | None]:
+    """Forward msg to the solokeys-gui socket.
+
+    Returns ``(response, fatal_error)``.
+    ``response`` is the GUI result on success.
+    ``fatal_error`` is set when we should not fall back to direct device access.
+    """
     import socket as _socket
     import time
 
@@ -63,13 +68,13 @@ def _try_gui_socket(msg, retries: int = 2) -> dict | None:
             if sys.platform == "win32":
                 with Client(_PIPE_NAME, family="AF_PIPE") as conn:
                     conn.send(msg)
-                    return conn.recv()
+                    return conn.recv(), None
 
             if not hasattr(_socket, "AF_UNIX"):
-                return None
+                return None, None
 
             if not _SOCKET_PATH.exists():
-                return None
+                return None, None
 
             with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
                 s.settimeout(3.0)
@@ -81,13 +86,33 @@ def _try_gui_socket(msg, retries: int = 2) -> dict | None:
                 length = struct.unpack('<I', raw_len)[0]
                 response = json.loads(_recv_exactly(s, length).decode())
                 # GUI responded successfully
-                return response
+                return response, None
+        except PermissionError as exc:
+            if sys.platform == "win32":
+                return None, (
+                    "SoloKeys GUI is running, but the browser bridge cannot access its "
+                    f"Windows named pipe: {exc}. "
+                    "Direct fallback is disabled to avoid conflicting access to the token."
+                )
+            if attempt < retries - 1:
+                time.sleep(0.2)
+            continue
+        except OSError as exc:
+            if sys.platform == "win32" and getattr(exc, "winerror", None) == 5:
+                return None, (
+                    "SoloKeys GUI is running, but the browser bridge cannot access its "
+                    f"Windows named pipe: {exc}. "
+                    "Direct fallback is disabled to avoid conflicting access to the token."
+                )
+            if attempt < retries - 1:
+                time.sleep(0.2)  # Brief wait before retry
+            continue
         except Exception:
             if attempt < retries - 1:
                 time.sleep(0.2)  # Brief wait before retry
             continue
     # All retries failed - fall back to direct HID
-    return None
+    return None, None
 
 
 def _recv_exactly(s, n: int) -> bytes:
@@ -187,9 +212,12 @@ def main():
     # Always prefer GUI socket when available - GUI handles device state properly
     # Only fall back to direct HID if socket doesn't exist or fails
     if _PATH_OVERRIDE != "direct":
-        response = _try_gui_socket(msg, retries=2)
+        response, fatal_error = _try_gui_socket(msg, retries=2)
         if response is not None:
             send_message(response)
+            return
+        if fatal_error is not None:
+            send_message({"success": False, "error": fatal_error})
             return
         if _PATH_OVERRIDE == "socket":
             send_message({"success": False,
