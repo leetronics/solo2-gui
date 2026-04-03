@@ -160,8 +160,8 @@ class SettingsTab(QWidget):
 
         host_info = QLabel(
             "The native messaging host allows the Chrome extension to access your SoloKeys "
-            "directly via HID — no need for this application to be running. "
-            "It must be registered once per user account."
+            "directly via HID. Source installs and AppImages register it per user account. "
+            "Linux system packages may install it system-wide."
         )
         host_info.setWordWrap(True)
         host_layout.addWidget(host_info)
@@ -211,15 +211,25 @@ class SettingsTab(QWidget):
         return widget
 
     def _refresh_host_status(self) -> None:
-        registered = native_host_installer.is_registered()
-        if registered:
+        scope = native_host_installer.registration_scope()
+        if scope == "system":
+            self._host_status_label.setText("✓ Registered system-wide")
+            self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._register_btn.setText("Managed by system package")
+            self._register_btn.setEnabled(False)
+            self._unregister_btn.setEnabled(False)
+        elif scope == "user":
             self._host_status_label.setText("✓ Registered")
             self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
             self._register_btn.setText("Re-register")
+            self._register_btn.setEnabled(True)
+            self._unregister_btn.setEnabled(True)
         else:
             self._host_status_label.setText("✗ Not registered")
             self._host_status_label.setStyleSheet("color: red; font-weight: bold;")
             self._register_btn.setText("Register with Chrome/Chromium")
+            self._register_btn.setEnabled(True)
+            self._unregister_btn.setEnabled(False)
 
     def _on_register_host(self) -> None:
         success, msg = native_host_installer.install()

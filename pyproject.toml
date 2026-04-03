@@ -8,6 +8,11 @@ readme = "README.md"
 packages = [
     {include = "solo_gui", from = "src"},
 ]
+include = [
+    { path = "src/solo_gui/resources/*.png", format = ["sdist", "wheel"] },
+    { path = "src/solo_gui/resources/*.ico", format = ["sdist", "wheel"] },
+    { path = "src/solo_gui/resources/*.icns", format = ["sdist", "wheel"] },
+]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -29,6 +34,7 @@ mypy = "^1.7.1"
 pyinstaller = "^6.2.0"
 
 [tool.poetry.scripts]
+solokeys-gui = "solo_gui.main:main"
 solokeys-secrets-host = "solo_gui.native_host:main"
 
 [build-system]

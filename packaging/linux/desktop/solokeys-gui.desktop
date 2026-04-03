@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SoloKeys GUI
+Comment=Manage your Solo 2 device
+Exec=solokeys-gui
+Icon=solokeys-gui
+Categories=Utility;Security;
+Terminal=false
+StartupNotify=true

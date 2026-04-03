@@ -1,11 +1,13 @@
 """
 Register / unregister the SoloKeys Secrets native messaging host with Chrome/Chromium.
 
-Works in three deployment scenarios:
-  1. Frozen PyInstaller app — looks for a sibling 'solokeys-secrets-host[.exe]' binary
+Works in four deployment scenarios:
+  1. System-wide Linux package — uses packaged manifests in /etc/.../native-messaging-hosts
+     and a stable host wrapper in /usr/bin.
+  2. Frozen PyInstaller app — looks for a sibling 'solokeys-secrets-host[.exe]' binary
      next to the main executable.  No Python needed on the user's machine.
-  2. Installed via pip/poetry — uses the 'solokeys-secrets-host' console-script entry point.
-  3. Running from source — creates a thin wrapper script that calls the module.
+  3. Installed via pip/poetry — uses the 'solokeys-secrets-host' console-script entry point.
+  4. Running from source — creates a thin wrapper script that calls the module.
 """
 
 import json
@@ -16,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 HOST_NAME = "com.solokeys.secrets"
-COMPAT_HOST_NAMES = (HOST_NAME, "com.solokeys.totp")
+OBSOLETE_HOST_NAMES = ("com.solokeys.totp",)
 
 # Fixed Chrome extension ID derived from the bundled RSA public key in
 # chrome-solokeys-totp/manifest.json ("key" field).  Must stay in sync.
@@ -43,7 +45,7 @@ def _get_data_dir() -> Path:
 
 
 def _get_manifest_dirs() -> list[Path]:
-    """Return the directories where Chrome/Chromium look for native host manifests."""
+    """Return per-user directories where Chrome/Chromium look for manifests."""
     if sys.platform == "win32":
         # On Windows the manifest path is stored in the registry; we write the
         # JSON file to our data dir and register its path.
@@ -62,6 +64,17 @@ def _get_manifest_dirs() -> list[Path]:
             Path.home() / ".var" / "app" / "com.google.Chrome" / "config" / "google-chrome" / "NativeMessagingHosts",
             Path.home() / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium" / "NativeMessagingHosts",
         ]
+
+
+def _get_system_manifest_dirs() -> list[Path]:
+    """Return system-wide manifest directories for packaged Linux installs."""
+    if sys.platform in {"win32", "darwin"}:
+        return []
+    return [
+        Path("/etc/opt/chrome/native-messaging-hosts"),
+        Path("/etc/chromium/native-messaging-hosts"),
+        Path("/etc/chromium-browser/native-messaging-hosts"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +146,32 @@ def _create_wrapper() -> str:
 
 def is_registered() -> bool:
     """Return True if the native host manifest is installed and its path exists."""
-    if sys.platform == "win32":
-        return all(_is_registered_windows(host_name) for host_name in COMPAT_HOST_NAMES)
+    return registration_scope() != "none"
 
-    first_dir = _get_manifest_dirs()[0]
-    return all(
-        _manifest_is_valid(first_dir / _manifest_filename(host_name), host_name)
-        for host_name in COMPAT_HOST_NAMES
-    )
+
+def registration_scope() -> str:
+    """Return ``none``, ``user`` or ``system`` for the active registration."""
+    if sys.platform == "win32":
+        return "user" if _is_registered_windows(HOST_NAME) else "none"
+
+    for directory in _get_manifest_dirs():
+        if _manifest_dir_is_valid(directory):
+            return "user"
+
+    for directory in _get_system_manifest_dirs():
+        if _manifest_dir_is_valid(directory):
+            return "system"
+
+    return "none"
+
+
+def is_system_managed() -> bool:
+    """Return True when the active registration comes from a system package."""
+    return registration_scope() == "system"
+
+
+def _manifest_dir_is_valid(directory: Path) -> bool:
+    return _manifest_is_valid(directory / _manifest_filename(HOST_NAME), HOST_NAME)
 
 
 def _is_registered_windows(host_name: str) -> bool:
@@ -182,6 +213,12 @@ def install() -> tuple[bool, str]:
 
     Returns (success, message).
     """
+    if is_system_managed():
+        return True, (
+            "Native host is already installed system-wide by the Linux package.\n"
+            "No per-user registration is needed."
+        )
+
     host_exe = find_native_host_exe()
     if not host_exe:
         return False, "Could not locate the native host executable."
@@ -191,8 +228,7 @@ def install() -> tuple[bool, str]:
             _install_windows(host_exe)
         else:
             _install_posix(host_exe)
-        aliases = ", ".join(COMPAT_HOST_NAMES)
-        return True, f"Registered native host aliases.\nHosts: {aliases}\nHost: {host_exe}"
+        return True, f"Registered native host.\nHost: {HOST_NAME}\nPath: {host_exe}"
     except Exception as e:
         return False, f"Registration failed: {e}"
 
@@ -212,11 +248,12 @@ def _install_posix(host_exe: str) -> None:
     for d in _get_manifest_dirs():
         try:
             d.mkdir(parents=True, exist_ok=True)
-            for host_name in COMPAT_HOST_NAMES:
-                (d / _manifest_filename(host_name)).write_text(
-                    json.dumps(_build_manifest(host_name, host_exe), indent=2),
-                    encoding="utf-8",
-                )
+            (d / _manifest_filename(HOST_NAME)).write_text(
+                json.dumps(_build_manifest(HOST_NAME, host_exe), indent=2),
+                encoding="utf-8",
+            )
+            for host_name in OBSOLETE_HOST_NAMES:
+                (d / _manifest_filename(host_name)).unlink(missing_ok=True)
         except Exception as e:
             errors.append(f"{d}: {e}")
     if errors and len(errors) == len(_get_manifest_dirs()):
@@ -228,24 +265,38 @@ def _install_windows(host_exe: str) -> None:
 
     data_dir = _get_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
-    for host_name in COMPAT_HOST_NAMES:
-        manifest_path = data_dir / _manifest_filename(host_name)
-        manifest_path.write_text(
-            json.dumps(_build_manifest(host_name, host_exe), indent=2),
-            encoding="utf-8",
-        )
+    manifest_path = data_dir / _manifest_filename(HOST_NAME)
+    manifest_path.write_text(
+        json.dumps(_build_manifest(HOST_NAME, host_exe), indent=2),
+        encoding="utf-8",
+    )
 
-        reg_keys = [
+    reg_keys = [
+        rf"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}",
+        rf"Software\Chromium\NativeMessagingHosts\{HOST_NAME}",
+    ]
+    for key_path in reg_keys:
+        try:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, str(manifest_path))
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f"[installer] Registry warning for {key_path}: {e}")
+
+    for host_name in OBSOLETE_HOST_NAMES:
+        obsolete_path = data_dir / _manifest_filename(host_name)
+        try:
+            obsolete_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        for key_path in [
             rf"Software\Google\Chrome\NativeMessagingHosts\{host_name}",
             rf"Software\Chromium\NativeMessagingHosts\{host_name}",
-        ]
-        for key_path in reg_keys:
+        ]:
             try:
-                key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
-                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, str(manifest_path))
-                winreg.CloseKey(key)
-            except Exception as e:
-                print(f"[installer] Registry warning for {key_path}: {e}")
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+            except FileNotFoundError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +306,12 @@ def _install_windows(host_exe: str) -> None:
 def uninstall() -> tuple[bool, str]:
     """Remove the native messaging host registration. Returns (success, message)."""
     try:
+        if is_system_managed():
+            return (
+                False,
+                "The native host is installed system-wide by the Linux package.\n"
+                "Remove the package or the system manifest files with administrator privileges.",
+            )
         if sys.platform == "win32":
             _uninstall_windows()
         else:
@@ -266,7 +323,7 @@ def uninstall() -> tuple[bool, str]:
 
 def _uninstall_posix() -> None:
     for d in _get_manifest_dirs():
-        for host_name in COMPAT_HOST_NAMES:
+        for host_name in (HOST_NAME, *OBSOLETE_HOST_NAMES):
             target = d / _manifest_filename(host_name)
             try:
                 target.unlink(missing_ok=True)
@@ -277,7 +334,7 @@ def _uninstall_posix() -> None:
 def _uninstall_windows() -> None:
     import winreg
 
-    for host_name in COMPAT_HOST_NAMES:
+    for host_name in (HOST_NAME, *OBSOLETE_HOST_NAMES):
         reg_keys = [
             rf"Software\Google\Chrome\NativeMessagingHosts\{host_name}",
             rf"Software\Chromium\NativeMessagingHosts\{host_name}",
@@ -288,7 +345,7 @@ def _uninstall_windows() -> None:
             except FileNotFoundError:
                 pass
 
-    for host_name in COMPAT_HOST_NAMES:
+    for host_name in (HOST_NAME, *OBSOLETE_HOST_NAMES):
         manifest_path = _get_data_dir() / _manifest_filename(host_name)
         try:
             manifest_path.unlink(missing_ok=True)

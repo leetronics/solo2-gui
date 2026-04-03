@@ -46,6 +46,8 @@ If you are developing `solo2-python` and this GUI side by side, the GUI source t
 
 For Linux, the recommended deployment path is a normal checkout plus a virtualenv. The AppImage build remains available, but if the desktop environment or bundled GLib stack causes trouble, run the application directly from a cloned repo instead.
 
+For end users on Debian/Ubuntu-style systems, the preferred packaged install is now the native `.deb` artifact from Releases. It installs the desktop launcher, the Chrome/Chromium native messaging host and the SoloKeys udev rules system-wide.
+
 Install `libusb` and, if you want smartcard-backed features, `pcscd` plus the PC/SC development headers.
 
 Example for Debian/Ubuntu:
@@ -82,13 +84,27 @@ pip install -r requirements.txt
 PYTHONPATH=src python -m solo_gui.main
 ```
 
+To install the packaged Debian/Ubuntu build:
+
+```bash
+sudo apt install ./solokeys-gui_<version>_amd64.deb
+```
+
+After installing the package, unplug and replug the SoloKey once so the fresh udev rules apply. Browser integration should already be registered system-wide for Chrome/Chromium.
+
 If you want a packaged Linux artifact anyway, the AppImage build path is still available:
 
 ```bash
 ./build_linux.sh
 ```
 
-The AppImage is written to `dist/`. The source-based path above is the simpler fallback for users and testers if the AppImage does not behave correctly on a given distro or desktop stack.
+To build the Debian package locally:
+
+```bash
+./build_linux_deb.sh
+```
+
+The AppImage is written to `dist/`. The Debian package is written to `dist/` as `solokeys-gui_<version>_<arch>.deb`. For non-Debian distros, the source-based path above remains the simplest supported fallback until native rpm packaging is added.
 
 ### macOS
 
@@ -128,6 +144,8 @@ The build also creates an intermediate PyInstaller app folder in `dist\SoloKeys 
 
 The application can register a native messaging host named `com.solokeys.secrets` for Chrome/Chromium. When the app starts, it attempts to register the host automatically if it is missing, and the same action is available in `Settings -> Browser`.
 
+Linux `.deb` packages install the native host manifests system-wide, so in-app registration is mainly relevant for source installs and AppImages.
+
 The native host supports two modes:
 
 - Forward requests to the running GUI over a local socket
@@ -154,7 +172,9 @@ src/solo_gui/utils/      Autostart, USB monitoring, helpers
 solokeys_gui.spec        PyInstaller spec for the desktop app
 native_host.spec         PyInstaller spec for the native host helper
 build_macos.sh           macOS packaging script
+build_linux_deb.sh       Debian/Ubuntu packaging script
 build_windows.bat        Windows packaging script
+packaging/linux/         Linux desktop, native-host, udev and Debian package assets
 installer_windows.iss    Inno Setup script for the Windows installer
 test_*.py                Current pytest-based checks in the repo root
 ```
