@@ -107,7 +107,7 @@ jobs:
           prerelease: true
           make_latest: false
           overwrite_files: true
-          files: dist/SoloKeys GUI-*.dmg
+          files: dist/SoloKeys-GUI-*.dmg
 
   build-windows:
     name: Windows

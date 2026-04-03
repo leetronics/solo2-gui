@@ -83,7 +83,7 @@ jobs:
         with:
           tag_name: ${{ needs.prepare.outputs.tag_name }}
           overwrite_files: true
-          files: dist/SoloKeys GUI-*.dmg
+          files: dist/SoloKeys-GUI-*.dmg
 
   build-windows:
     name: Windows

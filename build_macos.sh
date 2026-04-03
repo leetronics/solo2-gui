@@ -40,7 +40,7 @@ else
 fi
 
 APP_VERSION="$(python3 scripts/app_version.py resolved)"
-DMG_NAME="SoloKeys GUI-${APP_VERSION}.dmg"
+DMG_NAME="SoloKeys-GUI-${APP_VERSION}.dmg"
 
 # ---------------------------------------------------------------------------
 # 2. Detect libusb
