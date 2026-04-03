@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 HOST_NAME = "com.solokeys.secrets"
-_MANIFEST_FILENAME = f"{HOST_NAME}.json"
+COMPAT_HOST_NAMES = (HOST_NAME, "com.solokeys.totp")
 
 # Fixed Chrome extension ID derived from the bundled RSA public key in
 # chrome-solokeys-totp/manifest.json ("key" field).  Must stay in sync.
@@ -27,6 +27,10 @@ EXTENSION_ORIGIN = f"chrome-extension://{EXTENSION_ID}/"
 # ---------------------------------------------------------------------------
 # Platform paths
 # ---------------------------------------------------------------------------
+
+
+def _manifest_filename(host_name: str) -> str:
+    return f"{host_name}.json"
 
 def _get_data_dir() -> Path:
     if sys.platform == "win32":
@@ -130,30 +134,34 @@ def _create_wrapper() -> str:
 def is_registered() -> bool:
     """Return True if the native host manifest is installed and its path exists."""
     if sys.platform == "win32":
-        return _is_registered_windows()
-    else:
-        first_dir = _get_manifest_dirs()[0]
-        manifest_path = first_dir / _MANIFEST_FILENAME
-        return _manifest_is_valid(manifest_path)
+        return all(_is_registered_windows(host_name) for host_name in COMPAT_HOST_NAMES)
+
+    first_dir = _get_manifest_dirs()[0]
+    return all(
+        _manifest_is_valid(first_dir / _manifest_filename(host_name), host_name)
+        for host_name in COMPAT_HOST_NAMES
+    )
 
 
-def _is_registered_windows() -> bool:
+def _is_registered_windows(host_name: str) -> bool:
     try:
         import winreg
-        key_path = rf"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}"
+        key_path = rf"Software\Google\Chrome\NativeMessagingHosts\{host_name}"
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
         manifest_path_str, _ = winreg.QueryValueEx(key, "")
         winreg.CloseKey(key)
-        return _manifest_is_valid(Path(manifest_path_str))
+        return _manifest_is_valid(Path(manifest_path_str), host_name)
     except Exception:
         return False
 
 
-def _manifest_is_valid(path: Path) -> bool:
+def _manifest_is_valid(path: Path, expected_host_name: str) -> bool:
     if not path.exists():
         return False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("name") != expected_host_name:
+            return False
         host_exe = data.get("path", "")
         if not host_exe or not Path(host_exe).exists():
             return False
@@ -178,57 +186,66 @@ def install() -> tuple[bool, str]:
     if not host_exe:
         return False, "Could not locate the native host executable."
 
-    manifest = {
-        "name": HOST_NAME,
+    try:
+        if sys.platform == "win32":
+            _install_windows(host_exe)
+        else:
+            _install_posix(host_exe)
+        aliases = ", ".join(COMPAT_HOST_NAMES)
+        return True, f"Registered native host aliases.\nHosts: {aliases}\nHost: {host_exe}"
+    except Exception as e:
+        return False, f"Registration failed: {e}"
+
+
+def _build_manifest(host_name: str, host_exe: str) -> dict:
+    return {
+        "name": host_name,
         "description": "SoloKeys Secrets native messaging host",
         "path": host_exe,
         "type": "stdio",
         "allowed_origins": [EXTENSION_ORIGIN],
     }
 
-    try:
-        if sys.platform == "win32":
-            _install_windows(manifest)
-        else:
-            _install_posix(manifest)
-        return True, f"Registered native host.\nHost: {host_exe}"
-    except Exception as e:
-        return False, f"Registration failed: {e}"
 
-
-def _install_posix(manifest: dict) -> None:
+def _install_posix(host_exe: str) -> None:
     errors = []
     for d in _get_manifest_dirs():
         try:
             d.mkdir(parents=True, exist_ok=True)
-            (d / _MANIFEST_FILENAME).write_text(
-                json.dumps(manifest, indent=2), encoding="utf-8"
-            )
+            for host_name in COMPAT_HOST_NAMES:
+                (d / _manifest_filename(host_name)).write_text(
+                    json.dumps(_build_manifest(host_name, host_exe), indent=2),
+                    encoding="utf-8",
+                )
         except Exception as e:
             errors.append(f"{d}: {e}")
     if errors and len(errors) == len(_get_manifest_dirs()):
         raise RuntimeError("\n".join(errors))
 
 
-def _install_windows(manifest: dict) -> None:
+def _install_windows(host_exe: str) -> None:
     import winreg
 
     data_dir = _get_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = data_dir / _MANIFEST_FILENAME
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    for host_name in COMPAT_HOST_NAMES:
+        manifest_path = data_dir / _manifest_filename(host_name)
+        manifest_path.write_text(
+            json.dumps(_build_manifest(host_name, host_exe), indent=2),
+            encoding="utf-8",
+        )
 
-    reg_keys = [
-        rf"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}",
-        rf"Software\Chromium\NativeMessagingHosts\{HOST_NAME}",
-    ]
-    for key_path in reg_keys:
-        try:
-            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, str(manifest_path))
-            winreg.CloseKey(key)
-        except Exception as e:
-            print(f"[installer] Registry warning for {key_path}: {e}")
+        reg_keys = [
+            rf"Software\Google\Chrome\NativeMessagingHosts\{host_name}",
+            rf"Software\Chromium\NativeMessagingHosts\{host_name}",
+        ]
+        for key_path in reg_keys:
+            try:
+                key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, str(manifest_path))
+                winreg.CloseKey(key)
+            except Exception as e:
+                print(f"[installer] Registry warning for {key_path}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -249,28 +266,31 @@ def uninstall() -> tuple[bool, str]:
 
 def _uninstall_posix() -> None:
     for d in _get_manifest_dirs():
-        target = d / _MANIFEST_FILENAME
-        try:
-            target.unlink(missing_ok=True)
-        except Exception:
-            pass
+        for host_name in COMPAT_HOST_NAMES:
+            target = d / _manifest_filename(host_name)
+            try:
+                target.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _uninstall_windows() -> None:
     import winreg
 
-    reg_keys = [
-        rf"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}",
-        rf"Software\Chromium\NativeMessagingHosts\{HOST_NAME}",
-    ]
-    for key_path in reg_keys:
-        try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
-        except FileNotFoundError:
-            pass
+    for host_name in COMPAT_HOST_NAMES:
+        reg_keys = [
+            rf"Software\Google\Chrome\NativeMessagingHosts\{host_name}",
+            rf"Software\Chromium\NativeMessagingHosts\{host_name}",
+        ]
+        for key_path in reg_keys:
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+            except FileNotFoundError:
+                pass
 
-    manifest_path = _get_data_dir() / _MANIFEST_FILENAME
-    try:
-        manifest_path.unlink(missing_ok=True)
-    except Exception:
-        pass
+    for host_name in COMPAT_HOST_NAMES:
+        manifest_path = _get_data_dir() / _manifest_filename(host_name)
+        try:
+            manifest_path.unlink(missing_ok=True)
+        except Exception:
+            pass
