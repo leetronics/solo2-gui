@@ -22,10 +22,54 @@ jobs:
         shell: bash
         run: echo "build_version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+  clear-ci-release-assets:
+    name: Clear Existing ci-latest Assets
+    runs-on: ubuntu-22.04
+    needs: prepare
+
+    steps:
+      - name: Delete existing assets from ci-latest draft release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = "ci-latest";
+
+            let release;
+            try {
+              const response = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag,
+              });
+              release = response.data;
+            } catch (error) {
+              if (error.status === 404) {
+                core.info(`Release ${tag} does not exist yet; nothing to delete.`);
+                return;
+              }
+              throw error;
+            }
+
+            if (!release.assets || release.assets.length === 0) {
+              core.info(`Release ${tag} has no assets to delete.`);
+              return;
+            }
+
+            for (const asset of release.assets) {
+              core.info(`Deleting old asset: ${asset.name}`);
+              await github.rest.repos.deleteReleaseAsset({
+                owner,
+                repo,
+                asset_id: asset.id,
+              });
+            }
+
   build-macos:
     name: macOS
     runs-on: macos-14
-    needs: prepare
+    needs: [prepare, clear-ci-release-assets]
     env:
       SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.build_version }}
 
@@ -57,7 +101,7 @@ jobs:
   build-windows:
     name: Windows
     runs-on: windows-2022
-    needs: prepare
+    needs: [prepare, clear-ci-release-assets]
     env:
       SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.build_version }}
 
@@ -107,7 +151,7 @@ jobs:
   build-linux:
     name: Linux
     runs-on: ubuntu-22.04
-    needs: prepare
+    needs: [prepare, clear-ci-release-assets]
     env:
       SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.build_version }}
 
