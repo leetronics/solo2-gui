@@ -108,18 +108,33 @@ class Solo2PcscConnection:
         self._selected_aid = aid
         return payload
 
-    def call_secrets(self, apdu: bytes) -> bytes:
-        if self._selected_aid != SECRETS_AID:
-            self.select(SECRETS_AID)
+    def _transmit_selected(self, aid: bytes, apdu: bytes) -> tuple[bytes, int, int]:
+        """Transmit an APDU against a selected applet, retrying once on transient 6F00."""
+        if self._selected_aid != aid:
+            self.select(aid)
+
         payload, sw1, sw2 = self._transmit_all(apdu)
+        if (sw1, sw2) == (0x6F, 0x00):
+            _log.debug(
+                "PCSC transient 6F00 on reader=%s aid=%s, retrying after reselect",
+                self.reader_name,
+                aid.hex(),
+            )
+            self._selected_aid = None
+            self.select(aid)
+            payload, sw1, sw2 = self._transmit_all(apdu)
+        return payload, sw1, sw2
+
+    def call_secrets(self, apdu: bytes) -> bytes:
+        payload, sw1, sw2 = self._transmit_selected(SECRETS_AID, apdu)
         return bytes([sw1, sw2]) + payload
 
     def call_admin(self, command: int, data: bytes = b"", response_len: Optional[int] = None) -> bytes:
-        if self._selected_aid != ADMIN_AID:
-            self.select(ADMIN_AID)
         p1 = data[0] if data else 0x00
-        payload = self._transmit_all(_build_apdu(0x00, command, 0x00, p1, data, response_len))
-        body, sw1, sw2 = payload
+        body, sw1, sw2 = self._transmit_selected(
+            ADMIN_AID,
+            _build_apdu(0x00, command, 0x00, p1, data, response_len),
+        )
         if (sw1, sw2) != SW_SUCCESS:
             raise RuntimeError(f"Admin command 0x{command:02X} failed: SW={sw1:02X}{sw2:02X}")
         return body
