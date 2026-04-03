@@ -212,11 +212,18 @@ class SettingsTab(QWidget):
 
     def _refresh_host_status(self) -> None:
         scope = native_host_installer.registration_scope()
+        needs_repair = native_host_installer.needs_repair()
         if scope == "system":
-            self._host_status_label.setText("✓ Registered system-wide")
-            self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self._register_btn.setText("Managed by system package")
-            self._register_btn.setEnabled(False)
+            if needs_repair:
+                self._host_status_label.setText("⚠ System registration needs repair")
+                self._host_status_label.setStyleSheet("color: #c77d00; font-weight: bold;")
+                self._register_btn.setText("Repair browser host registration")
+                self._register_btn.setEnabled(True)
+            else:
+                self._host_status_label.setText("✓ Registered system-wide")
+                self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
+                self._register_btn.setText("Managed by system package")
+                self._register_btn.setEnabled(False)
             self._unregister_btn.setEnabled(False)
         elif scope == "user":
             self._host_status_label.setText("✓ Registered")

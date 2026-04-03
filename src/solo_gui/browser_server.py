@@ -165,7 +165,11 @@ class BrowserServer(QObject):
                 except Exception:
                     pass
                 return
-            response = self._handle_message(msg)
+            try:
+                response = self._handle_message(msg)
+            except Exception as e:
+                _log.exception("BrowserServer pipe handler failed")
+                response = {"success": False, "error": str(e)}
             try:
                 conn.send(response)
             except Exception:
@@ -182,7 +186,11 @@ class BrowserServer(QObject):
                 except Exception:
                     pass
                 return
-            response = self._handle_message(msg)
+            try:
+                response = self._handle_message(msg)
+            except Exception as e:
+                _log.exception("BrowserServer socket handler failed")
+                response = {"success": False, "error": str(e)}
             try:
                 self._send_framed(sock, response)
             except Exception:
@@ -211,19 +219,47 @@ class BrowserServer(QObject):
     # ------------------------------------------------------------------
     # Message dispatch
 
+    def _browser_transport(self, apdu: bytes) -> bytes:
+        done = threading.Event()
+        state: dict[str, object] = {"response": None, "error": None}
+
+        def on_response(response: bytes | None, error: str | None) -> None:
+            state["response"] = response
+            state["error"] = error
+            done.set()
+
+        DeviceManager.get_instance().send_browser_apdu(
+            apdu,
+            on_response,
+            operation_id="browser_ipc_apdu",
+        )
+
+        if not done.wait(timeout=15.0):
+            raise TimeoutError("Timed out waiting for device response")
+
+        error = state["error"]
+        if error:
+            raise RuntimeError(str(error))
+
+        response = state["response"]
+        if response is None:
+            raise RuntimeError("No device response received")
+        return bytes(response)
+
     def _get_oath_bridge(self):
         if not hasattr(self, '_oath_bridge') or self._oath_bridge is None:
             from solo_gui.oath_bridge import OATHBridge
-            self._oath_bridge = OATHBridge()
+            self._oath_bridge = OATHBridge(transport=self._browser_transport)
         return self._oath_bridge
 
     def _handle_message(self, msg: dict) -> dict:
         from solo_gui.oath_bridge import OATHTouchRequired, OATHPINRequired
         action = msg.get("action")
-        bridge = self._get_oath_bridge()
 
         if action == "ping":
             return {"success": True}
+
+        bridge = self._get_oath_bridge()
 
         if action == "listCredentials":
             try:

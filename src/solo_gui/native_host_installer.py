@@ -146,6 +146,8 @@ def _create_wrapper() -> str:
 
 def is_registered() -> bool:
     """Return True if the native host manifest is installed and its path exists."""
+    if needs_repair():
+        return False
     return registration_scope() != "none"
 
 
@@ -170,8 +172,32 @@ def is_system_managed() -> bool:
     return registration_scope() == "system"
 
 
+def needs_repair() -> bool:
+    """Return True when startup should repair conflicting native-host state."""
+    if _has_valid_system_manifest() and _has_user_manifest_overrides():
+        return True
+    return registration_scope() == "none"
+
+
 def _manifest_dir_is_valid(directory: Path) -> bool:
     return _manifest_is_valid(directory / _manifest_filename(HOST_NAME), HOST_NAME)
+
+
+def _has_valid_system_manifest() -> bool:
+    for directory in _get_system_manifest_dirs():
+        if _manifest_dir_is_valid(directory):
+            return True
+    return False
+
+
+def _has_user_manifest_overrides() -> bool:
+    if sys.platform in {"win32", "darwin"}:
+        return False
+    for directory in _get_manifest_dirs():
+        for host_name in (HOST_NAME, *OBSOLETE_HOST_NAMES):
+            if (directory / _manifest_filename(host_name)).exists():
+                return True
+    return False
 
 
 def _is_registered_windows(host_name: str) -> bool:
@@ -214,6 +240,19 @@ def install() -> tuple[bool, str]:
     Returns (success, message).
     """
     if is_system_managed():
+        try:
+            removed = _remove_user_manifest_overrides()
+        except Exception as e:
+            return False, f"Could not repair conflicting per-user manifests: {e}"
+
+        if removed:
+            paths = "\n".join(f"  • {path}" for path in removed)
+            return True, (
+                "Native host is already installed system-wide by the Linux package.\n"
+                "Removed conflicting per-user manifest overrides:\n"
+                f"{paths}"
+            )
+
         return True, (
             "Native host is already installed system-wide by the Linux package.\n"
             "No per-user registration is needed."
@@ -258,6 +297,24 @@ def _install_posix(host_exe: str) -> None:
             errors.append(f"{d}: {e}")
     if errors and len(errors) == len(_get_manifest_dirs()):
         raise RuntimeError("\n".join(errors))
+
+
+def _remove_user_manifest_overrides() -> list[str]:
+    removed: list[str] = []
+    errors: list[str] = []
+    for directory in _get_manifest_dirs():
+        for host_name in (HOST_NAME, *OBSOLETE_HOST_NAMES):
+            target = directory / _manifest_filename(host_name)
+            if not target.exists():
+                continue
+            try:
+                target.unlink()
+                removed.append(str(target))
+            except Exception as e:
+                errors.append(f"{target}: {e}")
+    if errors:
+        raise RuntimeError("\n".join(errors))
+    return removed
 
 
 def _install_windows(host_exe: str) -> None:
