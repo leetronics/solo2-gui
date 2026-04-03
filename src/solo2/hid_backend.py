@@ -6,21 +6,24 @@ import logging
 import sys
 from typing import Iterator
 
-from fido2.hid import CtapHidDevice
+from fido2.hid import CtapHidDevice, list_descriptors as list_fido2_descriptors, open_connection
 
 _log = logging.getLogger("solo2device")
 
 
-def _list_windows_fido2_devices() -> Iterator[CtapHidDevice]:
-    """Enumerate Windows CTAP HID devices via fido2's native SetupAPI backend."""
-    from fido2.hid import windows as backend
+def list_ctap_hid_descriptors():
+    """Enumerate CTAP HID descriptors without opening a CTAP session."""
+    if sys.platform == "win32":
+        _log.debug("list_ctap_hid_descriptors using native fido2 Windows backend")
+    else:
+        _log.debug("list_ctap_hid_descriptors using generic fido2 backend")
 
-    descriptors = backend.list_descriptors()
-    _log.debug("fido2.windows list_descriptors returned %d device(s)", len(descriptors))
+    descriptors = list(list_fido2_descriptors())
+    _log.debug("list_ctap_hid_descriptors returned %d device(s)", len(descriptors))
 
     for descriptor in descriptors:
         _log.debug(
-            "fido2.windows descriptor path=%r vid=0x%04x pid=0x%04x in=%s out=%s "
+            "fido2 descriptor path=%r vid=0x%04x pid=0x%04x in=%s out=%s "
             "product=%r serial=%r",
             descriptor.path,
             descriptor.vid,
@@ -30,28 +33,17 @@ def _list_windows_fido2_devices() -> Iterator[CtapHidDevice]:
             descriptor.product_name,
             descriptor.serial_number,
         )
-        try:
-            yield CtapHidDevice(descriptor, backend.open_connection(descriptor))
-        except Exception as exc:
-            _log.exception(
-                "fido2.windows failed to open CTAP device path=%r: %s",
-                descriptor.path,
-                exc,
-            )
+        yield descriptor
 
 
 def list_ctap_hid_devices() -> Iterator[CtapHidDevice]:
-    """List CTAP HID devices, preferring the native Windows fido2 backend."""
-    if sys.platform == "win32":
+    """Open CTAP HID devices from passive descriptor discovery."""
+    for descriptor in list_ctap_hid_descriptors():
         try:
-            _log.debug("list_ctap_hid_devices using native fido2 Windows backend")
-            yield from _list_windows_fido2_devices()
-            return
+            yield CtapHidDevice(descriptor, open_connection(descriptor))
         except Exception as exc:
             _log.exception(
-                "native fido2 Windows backend failed, falling back to generic backend: %s",
+                "failed to open CTAP device path=%r: %s",
+                descriptor.path,
                 exc,
             )
-
-    _log.debug("list_ctap_hid_devices using generic fido2 backend")
-    yield from CtapHidDevice.list_devices()

@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Sequence
 import usb.core
 
 from .device import DeviceMode, Solo2Descriptor, Solo2Device
-from .hid_backend import list_ctap_hid_devices
+from .hid_backend import list_ctap_hid_descriptors
 from .pcsc import list_pcsc_descriptors, should_prefer_ccid
 
 _log = logging.getLogger("solo2device")
@@ -21,25 +21,23 @@ def _list_hid_regular_descriptors() -> List[Solo2Descriptor]:
     seen_ids = set()
 
     try:
-        for hid_dev in list_ctap_hid_devices():
-            desc = getattr(hid_dev, "descriptor", None)
-            if not desc:
+        for desc in list_ctap_hid_descriptors():
+            hid_path = getattr(desc, "path", None)
+            if hid_path is None:
                 continue
-            candidate = Solo2Device(
+            descriptor_id = f"hid:{hid_path!r}"
+            if descriptor_id in seen_ids:
+                continue
+            descriptors.append(
                 Solo2Descriptor(
-                    id=f"hid:{getattr(desc, 'path', None)!r}",
+                    id=descriptor_id,
                     mode=DeviceMode.REGULAR,
-                    path=f"hid:{getattr(desc, 'path', None)!r}",
+                    path=descriptor_id,
                     transport="hid",
-                    hid_path=getattr(desc, "path", None),
+                    hid_path=hid_path,
                 )
             )
-            if candidate.connect():
-                if candidate.path in seen_ids:
-                    continue
-                descriptors.append(candidate.descriptor)
-                seen_ids.add(candidate.path)
-                candidate.disconnect()
+            seen_ids.add(descriptor_id)
     except Exception as exc:
         _log.debug("_list_hid_regular_descriptors failed: %s", exc)
     return descriptors
