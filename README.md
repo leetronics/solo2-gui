@@ -126,14 +126,6 @@ installer_windows.iss    Inno Setup script for the Windows installer
 test_*.py                Current pytest-based checks in the repo root
 ```
 
-### Tests
-
-```bash
-pytest
-```
-
-Several tests are device- and GUI-oriented, so a full run may require a connected Solo 2 and a working desktop environment.
-
 ## License
 
 This project is licensed under the GNU General Public License v3.0. See `LICENSE`.
