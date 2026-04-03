@@ -9,9 +9,7 @@
 setlocal enabledelayedexpansion
 
 set APP_NAME=SoloKeys GUI
-for /f "tokens=2 delims==" %%v in ('findstr /r "^version" pyproject.toml') do set APP_VERSION=%%v
-set APP_VERSION=%APP_VERSION: =%
-set APP_VERSION=%APP_VERSION:"=%
+for /f "tokens=*" %%v in ('python scripts\app_version.py resolved') do set APP_VERSION=%%v
 set APP_DIR=dist\%APP_NAME%
 set HOST_EXE=dist\solokeys-secrets-host.exe
 set INSTALLER_OUTPUT=dist\installer\SoloKeys-GUI-Setup-%APP_VERSION%.exe
@@ -101,6 +99,12 @@ echo Installing pywin32 for HID proxy service...
 pip install "pywin32>=306"
 if errorlevel 1 (
     echo Error: pywin32 install failed.
+    exit /b 1
+)
+
+python scripts\app_version.py write-build-module --version "%APP_VERSION%" >nul
+if errorlevel 1 (
+    echo Error: failed to write build version module.
     exit /b 1
 )
 
@@ -215,5 +219,7 @@ echo  Note: Windows SmartScreen may warn on first launch because
 echo  the installer and app are not code-signed. To suppress this warning,
 echo  sign the installer and bundled binaries before distribution.
 echo ============================================================
+
+if exist src\solo_gui\_build_version.py del /q src\solo_gui\_build_version.py >nul 2>&1
 
 endlocal

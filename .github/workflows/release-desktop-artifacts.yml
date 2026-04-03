@@ -1,7 +1,10 @@
-name: Build Desktop Artifacts
+name: Release Desktop Artifacts
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -11,23 +14,52 @@ env:
 
 jobs:
   prepare:
-    name: Prepare Build Version
+    name: Prepare Release Version
     runs-on: ubuntu-22.04
     outputs:
-      build_version: ${{ steps.meta.outputs.build_version }}
+      app_version: ${{ steps.meta.outputs.app_version }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
 
     steps:
-      - name: Determine CI build version
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Determine release version
         id: meta
         shell: bash
-        run: echo "build_version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: |
+          APP_VERSION="$(python3 scripts/app_version.py source)"
+          TAG_NAME="v${APP_VERSION}"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" != "${TAG_NAME}" ]]; then
+            echo "Git tag ${GITHUB_REF_NAME} does not match pyproject version ${APP_VERSION}" >&2
+            exit 1
+          fi
+          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-22.04
+    needs: prepare
+
+    steps:
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          generate_release_notes: true
 
   build-macos:
     name: macOS
     runs-on: macos-14
-    needs: prepare
+    needs: [prepare, create-release]
     env:
-      SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.build_version }}
+      SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.app_version }}
 
     steps:
       - name: Check out repository
@@ -46,20 +78,19 @@ jobs:
           chmod +x build_macos.sh
           ./build_macos.sh
 
-      - name: Upload macOS to draft release
+      - name: Upload macOS release artifact
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ci-latest
-          draft: true
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
           overwrite_files: true
           files: dist/SoloKeys GUI-*.dmg
 
   build-windows:
     name: Windows
     runs-on: windows-2022
-    needs: prepare
+    needs: [prepare, create-release]
     env:
-      SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.build_version }}
+      SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.app_version }}
 
     steps:
       - name: Check out repository
@@ -96,20 +127,19 @@ jobs:
         shell: cmd
         run: build_windows.bat
 
-      - name: Upload Windows to draft release
+      - name: Upload Windows release artifact
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ci-latest
-          draft: true
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
           overwrite_files: true
           files: dist/installer/SoloKeys-GUI-Setup-*.exe
 
   build-linux:
     name: Linux
     runs-on: ubuntu-22.04
-    needs: prepare
+    needs: [prepare, create-release]
     env:
-      SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.build_version }}
+      SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.app_version }}
 
     steps:
       - name: Check out repository
@@ -130,10 +160,9 @@ jobs:
           chmod +x build_linux.sh
           ./build_linux.sh
 
-      - name: Upload Linux to draft release
+      - name: Upload Linux release artifact
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ci-latest
-          draft: true
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
           overwrite_files: true
           files: dist/SoloKeys-GUI-*.AppImage

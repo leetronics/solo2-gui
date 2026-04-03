@@ -70,3 +70,4 @@ solo2-gui.code-workspace
 
 # Debug files
 src/solo_gui/debug.txt
+src/solo_gui/_build_version.py

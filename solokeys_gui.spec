@@ -26,8 +26,10 @@ src_root     = project_root / "src"   # compensates for main.py sys.path hack
 # ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
-_version_match = re.search(r'^version\s*=\s*"([^"]+)"', (project_root / "pyproject.toml").read_text(), re.MULTILINE)
-APP_VERSION = _version_match.group(1) if _version_match else "0.0.0"
+APP_VERSION = os.environ.get("SOLOKEYS_GUI_VERSION", "").strip()
+if not APP_VERSION:
+    _version_match = re.search(r'^version\s*=\s*"([^"]+)"', (project_root / "pyproject.toml").read_text(), re.MULTILINE)
+    APP_VERSION = _version_match.group(1) if _version_match else "0.0.0"
 
 # ---------------------------------------------------------------------------
 # Platform-specific libusb detection

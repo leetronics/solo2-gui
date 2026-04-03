@@ -7,6 +7,16 @@ set -euo pipefail
 
 APP_NAME="SoloKeys GUI"
 ARCH="$(uname -m)"
+BUILD_VERSION_FILE="src/solo_gui/_build_version.py"
+
+cleanup() {
+    rm -f "${BUILD_VERSION_FILE}"
+    if [[ -n "${APPIMAGE_DIR:-}" && -d "${APPIMAGE_DIR}" ]]; then
+        rm -rf "${APPIMAGE_DIR}"
+    fi
+}
+
+trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # 1. Check required tools
@@ -24,9 +34,7 @@ else
     exit 1
 fi
 
-APP_VERSION=$(
-    python3 -c 'import pathlib, re, sys; text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8"); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); sys.exit("Error: Could not determine app version from pyproject.toml") if match is None else print(match.group(1))'
-)
+APP_VERSION="$(python3 scripts/app_version.py resolved)"
 
 # ---------------------------------------------------------------------------
 # 2. Check PCSC development headers needed by pyscard
@@ -44,6 +52,7 @@ echo ""
 echo "Installing Python dependencies..."
 pip3 install -r requirements.txt
 pip3 install "pyinstaller>=6.2.0"
+python3 scripts/app_version.py write-build-module --version "${APP_VERSION}" >/dev/null
 
 # ---------------------------------------------------------------------------
 # 4. Clean previous build artifacts
@@ -86,7 +95,6 @@ echo ""
 echo "Building AppImage..."
 
 APPIMAGE_DIR="$(mktemp -d)"
-trap 'rm -rf "${APPIMAGE_DIR}"' EXIT
 
 # Prepare AppDir structure
 mkdir -p "${APPIMAGE_DIR}/usr/bin"

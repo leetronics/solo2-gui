@@ -6,6 +6,17 @@
 set -euo pipefail
 
 APP_NAME="SoloKeys GUI"
+BUILD_VERSION_FILE="src/solo_gui/_build_version.py"
+STAGING_DIR=""
+
+cleanup() {
+    rm -f "${BUILD_VERSION_FILE}"
+    if [[ -n "${STAGING_DIR}" && -d "${STAGING_DIR}" ]]; then
+        rm -rf "${STAGING_DIR}"
+    fi
+}
+
+trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # 1. Check required tools
@@ -28,9 +39,7 @@ else
     exit 1
 fi
 
-APP_VERSION=$(
-    python3 -c 'import pathlib, re, sys; text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8"); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); sys.exit("Error: Could not determine app version from pyproject.toml") if match is None else print(match.group(1))'
-)
+APP_VERSION="$(python3 scripts/app_version.py resolved)"
 DMG_NAME="SoloKeys GUI-${APP_VERSION}.dmg"
 
 # ---------------------------------------------------------------------------
@@ -59,6 +68,7 @@ echo "Installing Python dependencies..."
 pip3 install -r requirements.txt
 pip3 install "pyinstaller>=6.2.0"
 pip3 install "Pillow>=10.0.0"
+python3 scripts/app_version.py write-build-module --version "${APP_VERSION}" >/dev/null
 
 # ---------------------------------------------------------------------------
 # 4. Clean previous build artifacts
@@ -96,7 +106,6 @@ echo ""
 echo "Creating DMG..."
 
 STAGING_DIR="$(mktemp -d)"
-trap 'rm -rf "${STAGING_DIR}"' EXIT
 
 # Copy app and create Applications symlink for drag-to-install UX
 cp -R "dist/${APP_NAME}.app" "${STAGING_DIR}/"

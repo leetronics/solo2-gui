@@ -38,6 +38,8 @@ PYTHONPATH=src python -m solo_gui.main
 
 `poetry install` also works in this repository if you prefer Poetry over a plain virtualenv.
 
+If you are developing `solo2-python` and this GUI side by side, the GUI source tree also prefers a sibling checkout at `../solo2-python/src` during local source runs.
+
 ## Platform Notes
 
 ### Linux
@@ -109,6 +111,14 @@ The native host supports two modes:
 - Fall back to direct HID access when the GUI is not available
 
 ## Development
+
+### Versioning
+
+The central release version lives in `pyproject.toml` under `[tool.poetry].version`.
+
+- Normal source runs and release builds use that version.
+- The `Build Desktop Artifacts` CI workflow overrides it with the short Git commit hash for build artifacts.
+- The `Release Desktop Artifacts` workflow uses the central `pyproject.toml` version and publishes assets to tag `v<version>`.
 
 ### Project Layout
 
