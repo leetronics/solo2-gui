@@ -226,9 +226,14 @@ class SettingsTab(QWidget):
                 self._register_btn.setEnabled(False)
             self._unregister_btn.setEnabled(False)
         elif scope == "user":
-            self._host_status_label.setText("✓ Registered")
-            self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self._register_btn.setText("Re-register")
+            if needs_repair:
+                self._host_status_label.setText("⚠ Registered, but points to a different host")
+                self._host_status_label.setStyleSheet("color: #c77d00; font-weight: bold;")
+                self._register_btn.setText("Repair browser host registration")
+            else:
+                self._host_status_label.setText("✓ Registered")
+                self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
+                self._register_btn.setText("Re-register")
             self._register_btn.setEnabled(True)
             self._unregister_btn.setEnabled(True)
         else:

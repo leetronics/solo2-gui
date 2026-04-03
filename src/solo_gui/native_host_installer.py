@@ -34,6 +34,7 @@ EXTENSION_ORIGIN = f"chrome-extension://{EXTENSION_ID}/"
 def _manifest_filename(host_name: str) -> str:
     return f"{host_name}.json"
 
+
 def _get_data_dir() -> Path:
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
@@ -81,7 +82,14 @@ def _get_system_manifest_dirs() -> list[Path]:
 # Find the native host executable
 # ---------------------------------------------------------------------------
 
-def find_native_host_exe() -> Optional[str]:
+def _get_wrapper_path() -> Path:
+    here = Path(__file__).parent.resolve()
+    if sys.platform == "win32":
+        return here / "solokeys_secrets_host.bat"
+    return here / "solokeys_secrets_host.sh"
+
+
+def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
     """
     Return the absolute path to the native host executable, or None if not found.
 
@@ -104,6 +112,9 @@ def find_native_host_exe() -> Optional[str]:
         return on_path
 
     # 3. Create a wrapper that calls the module with the current Python interpreter
+    wrapper = _get_wrapper_path()
+    if wrapper.exists() or not create_wrapper:
+        return str(wrapper)
     return _create_wrapper()
 
 
@@ -174,9 +185,19 @@ def is_system_managed() -> bool:
 
 def needs_repair() -> bool:
     """Return True when startup should repair conflicting native-host state."""
+    scope = registration_scope()
     if _has_valid_system_manifest() and _has_user_manifest_overrides():
         return True
-    return registration_scope() == "none"
+    if scope == "none":
+        return True
+    if scope != "user":
+        return False
+
+    expected_host_exe = find_native_host_exe(create_wrapper=False)
+    registered_host_exe = _get_registered_host_exe(HOST_NAME)
+    if expected_host_exe and registered_host_exe:
+        return not _paths_match(expected_host_exe, registered_host_exe)
+    return False
 
 
 def _manifest_dir_is_valid(directory: Path) -> bool:
@@ -202,14 +223,60 @@ def _has_user_manifest_overrides() -> bool:
 
 def _is_registered_windows(host_name: str) -> bool:
     try:
-        import winreg
-        key_path = rf"Software\Google\Chrome\NativeMessagingHosts\{host_name}"
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
-        manifest_path_str, _ = winreg.QueryValueEx(key, "")
-        winreg.CloseKey(key)
-        return _manifest_is_valid(Path(manifest_path_str), host_name)
+        manifest_path = _get_registered_manifest_path(host_name)
+        return manifest_path is not None and _manifest_is_valid(manifest_path, host_name)
     except Exception:
         return False
+
+
+def _get_registered_manifest_path(host_name: str) -> Optional[Path]:
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            key_path = rf"Software\Google\Chrome\NativeMessagingHosts\{host_name}"
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
+            manifest_path_str, _ = winreg.QueryValueEx(key, "")
+            winreg.CloseKey(key)
+            return Path(manifest_path_str)
+        except Exception:
+            return None
+
+    for directory in _get_manifest_dirs():
+        manifest_path = directory / _manifest_filename(host_name)
+        if manifest_path.exists():
+            return manifest_path
+
+    for directory in _get_system_manifest_dirs():
+        manifest_path = directory / _manifest_filename(host_name)
+        if manifest_path.exists():
+            return manifest_path
+
+    return None
+
+
+def _get_registered_host_exe(host_name: str) -> Optional[str]:
+    manifest_path = _get_registered_manifest_path(host_name)
+    if manifest_path is None or not manifest_path.exists():
+        return None
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    host_exe = data.get("path", "")
+    return host_exe or None
+
+
+def _paths_match(left: str, right: str) -> bool:
+    try:
+        left_norm = os.path.normcase(str(Path(left).resolve(strict=False)))
+    except Exception:
+        left_norm = os.path.normcase(os.path.abspath(left))
+    try:
+        right_norm = os.path.normcase(str(Path(right).resolve(strict=False)))
+    except Exception:
+        right_norm = os.path.normcase(os.path.abspath(right))
+    return left_norm == right_norm
 
 
 def _manifest_is_valid(path: Path, expected_host_name: str) -> bool:
