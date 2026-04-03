@@ -19,6 +19,7 @@ Desktop GUI for managing Solo 2 devices across Linux, macOS, and Windows.
 - `libusb` available on the host system
 - PySide6 / Qt 6
 - Optional: `pcscd` plus `pyscard` for PIV and OpenPGP features
+  - Building `pyscard` on Linux also requires `libpcsclite-dev`
 
 ## Running From Source
 
@@ -29,9 +30,8 @@ cd solo2-gui
 python3 -m venv .venv
 source .venv/bin/activate
 
+# On Linux, install libpcsclite-dev first so pyscard can build successfully.
 pip install -r requirements.txt
-# Optional for PIV / OpenPGP support:
-# pip install pyscard
 
 PYTHONPATH=src python -m solo_gui.main
 ```
@@ -42,14 +42,14 @@ PYTHONPATH=src python -m solo_gui.main
 
 ### Linux
 
-Install `libusb` and, if you want smartcard-backed features, `pcscd`.
+Install `libusb` and, if you want smartcard-backed features, `pcscd` plus the PC/SC development headers.
 
 Example for Debian/Ubuntu:
 
 ```bash
 sudo apt install -y libusb-1.0-0
 # Optional:
-sudo apt install -y pcscd
+sudo apt install -y pcscd libpcsclite-dev
 ```
 
 For non-root HID access, install udev rules for SoloKeys devices:
