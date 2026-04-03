@@ -1,7 +1,12 @@
 """SoloKeys GUI - Platform-independent GUI for managing SoloKeys Solo 2 FIDO2 tokens."""
 
 import re
+import sys
 from pathlib import Path
+
+_fallback = Path(__file__).resolve().parents[3] / "solo2-python" / "src"
+if _fallback.exists() and str(_fallback) not in sys.path:
+    sys.path.insert(0, str(_fallback))
 
 try:
     from importlib.metadata import version as _pkg_version

@@ -9,36 +9,11 @@ Uses DeviceManager for thread-safe device access.
 """
 
 from typing import Optional
-from dataclasses import dataclass, field
-from enum import IntEnum
 
 from PySide6.QtCore import QObject, Signal
 
+from solo2.admin import AdminCommand, DeviceDiagnostics, RebootMode
 from solo_gui.device_manager import DeviceManager
-
-
-class AdminCommand(IntEnum):
-    """Solo2 admin app CTAPHID commands."""
-    VERSION = 0x61
-    UUID = 0x62
-    BOOT_TO_BOOTLOADER = 0x51
-    REBOOT = 0x53
-    LOCKED = 0x63
-
-
-class RebootMode(IntEnum):
-    """Reboot mode options."""
-    REGULAR = 0x00
-    BOOTLOADER = 0x01
-
-
-@dataclass
-class DeviceDiagnostics:
-    """Device diagnostic information."""
-    firmware_version: str = ""
-    uuid: str = ""
-    is_locked: bool = False
-    ctap2_options: dict = field(default_factory=dict)
 
 
 class AdminWorker(QObject):

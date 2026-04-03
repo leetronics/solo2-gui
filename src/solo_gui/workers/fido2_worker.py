@@ -1,30 +1,11 @@
-"""FIDO2 worker thread for SoloKeys GUI using DeviceManager.
+"""FIDO2 worker thread for SoloKeys GUI using DeviceManager."""
 
-This worker provides a thin wrapper around DeviceManager for FIDO2 operations,
-converting raw device data to Fido2Credential objects.
-"""
-
-from typing import Dict, List, Optional
-from dataclasses import dataclass
+from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
+from solo2.fido2 import Fido2Credential
 from solo_gui.device_manager import DeviceManager
-
-
-@dataclass
-class Fido2Credential:
-    """FIDO2 credential information."""
-    id: str
-    rp_id: str
-    rp_name: str
-    user_id: str
-    user_name: str
-    user_display_name: str
-    created: int
-    is_resident: bool
-    algorithm: str
-    cred_id: Optional[bytes] = None
 
 
 class Fido2Worker(QObject):
