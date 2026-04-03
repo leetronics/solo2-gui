@@ -218,28 +218,33 @@ def _handle_direct(msg: dict) -> dict:
 
 # ---------- Main ----------
 
-def main():
-    msg = read_message()
-    if msg is None:
-        send_message({"success": False, "error": "No message received"})
-        return
-
+def _handle_message(msg: dict) -> dict:
     # Always prefer GUI socket when available - GUI handles device state properly
     # Only fall back to direct HID if socket doesn't exist or fails
     if _PATH_OVERRIDE != "direct":
         response, fatal_error = _try_gui_socket(msg, retries=2)
         if response is not None:
-            send_message(response)
-            return
+            return response
         if fatal_error is not None:
-            send_message({"success": False, "error": fatal_error})
-            return
+            return {"success": False, "error": fatal_error}
         if _PATH_OVERRIDE == "socket":
-            send_message({"success": False,
-                          "error": "SoloKeys GUI is not running (SOLOKEYS_PATH=socket)"})
-            return
+            return {
+                "success": False,
+                "error": "SoloKeys GUI is not running (SOLOKEYS_PATH=socket)",
+            }
 
-    send_message(_handle_direct(msg))
+    return _handle_direct(msg)
+
+
+def main():
+    while True:
+        msg = read_message()
+        if msg is None:
+            return
+        try:
+            send_message(_handle_message(msg))
+        except Exception as exc:
+            send_message({"success": False, "error": str(exc)})
 
 
 if __name__ == '__main__':
