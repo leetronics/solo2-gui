@@ -1003,7 +1003,8 @@ class TotpTab(QWidget):
         """Handle status check result."""
         self._set_busy(False)
         self._status = status
-        self.totp_available.emit(status.supported and self._should_show_tab())
+        is_regular = bool(self._device) and getattr(self._device.mode, "value", None) == "regular"
+        self.totp_available.emit(status.supported and is_regular)
 
         if status.supported:
             self._status_label.setText(

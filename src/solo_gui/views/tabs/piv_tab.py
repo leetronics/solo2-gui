@@ -625,7 +625,8 @@ class PivTab(QWidget):
     # ---- Signal handlers ----
 
     def _on_piv_probed(self, available: bool) -> None:
-        self.piv_availability.emit(available and self._should_show_tab())
+        is_regular = bool(self._device) and getattr(self._device.mode, "value", None) == "regular"
+        self.piv_availability.emit(available and is_regular)
         if available:
             self._pcsc_warning_label.setVisible(False)
             self._set_controls_enabled(True)
