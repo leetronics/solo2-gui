@@ -73,6 +73,11 @@ if [[ ! -d "dist/${APP_NAME}" ]]; then
     exit 1
 fi
 
+# Keep the Linux bundle on Qt's native theme path. The GTK3 platform theme
+# plugin can pull host GTK/ATK libraries into the AppImage process and has
+# caused reproducible crashes on some desktops.
+find "dist/${APP_NAME}" -type f -name "libqgtk3.so" -delete
+
 # ---------------------------------------------------------------------------
 # 5. Run PyInstaller for native messaging host
 # ---------------------------------------------------------------------------
@@ -127,6 +132,7 @@ HERE="$(dirname "$SELF")"
 # Avoid loading host GIO/GVFS modules against bundled GLib/Qt libraries.
 # This is a common source of AppImage instability on newer Linux desktops.
 unset GIO_EXTRA_MODULES
+unset GTK_MODULES
 unset GTK_PATH
 unset GTK_EXE_PREFIX
 unset GTK_DATA_PREFIX
@@ -140,6 +146,7 @@ export GDK_PIXBUF_MODULE_FILE="${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cac
 export GIO_USE_VFS=local
 export GVFS_DISABLE_FUSE=1
 export GTK_A11Y=none
+export NO_AT_BRIDGE=1
 
 exec "${HERE}/usr/bin/SoloKeys GUI" "$@"
 EOF
