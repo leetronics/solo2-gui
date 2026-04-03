@@ -1,5 +1,7 @@
 """FIDO2 tab for SoloKeys GUI."""
 
+import os
+import sys
 from typing import Optional, List, Dict
 
 from PySide6.QtWidgets import (
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
 )
 from PySide6.QtCore import Qt, QThread, QTimer
+from PySide6.QtGui import QGuiApplication
 
 from solo_gui.models.device import SoloDevice
 from solo_gui.utils.windows_elevation import (
@@ -30,6 +33,32 @@ from solo_gui.utils.windows_elevation import (
     restart_as_admin,
 )
 from solo_gui.workers.fido2_worker import Fido2Worker, Fido2Credential
+
+
+def _is_dark_mode() -> bool:
+    """Detect if dark mode is enabled."""
+    force_mode = os.environ.get("SOLOKEYSGUI_THEME", "").lower()
+    if force_mode == "dark":
+        return True
+    if force_mode == "light":
+        return False
+    color_scheme = QGuiApplication.styleHints().colorScheme()
+    return color_scheme == Qt.ColorScheme.Dark
+
+
+def _get_warning_colors() -> dict:
+    """Get theme-aware colors for warning banners."""
+    if _is_dark_mode():
+        return {
+            "bg": "#4a3b12",
+            "border": "#8a6d1f",
+            "text": "#f3e3a1",
+        }
+    return {
+        "bg": "#fff3cd",
+        "border": "#e0c36d",
+        "text": "#664d03",
+    }
 
 
 class PinDialog(QDialog):
@@ -220,9 +249,7 @@ class Fido2Tab(QWidget):
 
         self._transport_hint_label = QLabel("")
         self._transport_hint_label.setWordWrap(True)
-        self._transport_hint_label.setStyleSheet(
-            "background-color: #fff3cd; padding: 8px; border-radius: 5px;"
-        )
+        self._apply_transport_hint_style()
         self._transport_hint_label.setVisible(False)
         pin_layout.addWidget(self._transport_hint_label)
 
@@ -264,6 +291,22 @@ class Fido2Tab(QWidget):
         self._device = device
         self._setup_worker()
         self._set_buttons_enabled(True)
+        # Show the Windows CCID-only hint immediately, even if the async
+        # get_info path later fails or is delayed.
+        if (
+            sys.platform == "win32"
+            and hasattr(device, "prefers_ccid")
+            and device.prefers_ccid()
+        ):
+            self._on_pin_status_updated(
+                {
+                    "ctap2_available": False,
+                    "pin_set": False,
+                    "pin_retries": None,
+                    "uv_set": False,
+                    "cred_mgmt_supported": False,
+                }
+            )
         # _update_pin_status will be called via signal after worker thread starts
 
     def refresh_state(self) -> None:
@@ -325,9 +368,20 @@ class Fido2Tab(QWidget):
         self._change_pin_button.setEnabled(enabled)
         self._set_pin_button.setEnabled(enabled)
 
+    def _apply_transport_hint_style(self) -> None:
+        """Apply theme-aware styling to the transport warning banner."""
+        colors = _get_warning_colors()
+        self._transport_hint_label.setStyleSheet(
+            f"background-color: {colors['bg']}; "
+            f"border: 1px solid {colors['border']}; "
+            f"color: {colors['text']}; "
+            "padding: 8px; border-radius: 5px;"
+        )
+
     def _set_transport_hint(self, message: str = "", *, show_restart: bool = False) -> None:
         """Show or hide the Windows-specific CTAP HID transport hint."""
         visible = bool(message)
+        self._apply_transport_hint_style()
         self._transport_hint_label.setVisible(visible)
         self._transport_hint_label.setText(message)
         self._restart_admin_button.setVisible(visible and show_restart)
