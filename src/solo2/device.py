@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import struct
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -341,7 +343,7 @@ class Solo2Device(SoloDevice):
 
     def _get_firmware_version_from_hid(self, hid_device) -> Optional[str]:
         try:
-            resp = hid_device.call(0x61, b"")
+            resp = self._call_hid_command(0x61, b"", hid_device=hid_device)
             if len(resp) < 4:
                 _log.debug(
                     "_get_firmware_version_from_hid short response path=%r len=%d",
@@ -370,7 +372,7 @@ class Solo2Device(SoloDevice):
 
     def _get_uuid_from_hid(self, hid_device) -> Optional[str]:
         try:
-            resp = hid_device.call(0x62, b"")
+            resp = self._call_hid_command(0x62, b"", hid_device=hid_device)
             if len(resp) < 16:
                 _log.debug(
                     "_get_uuid_from_hid short response path=%r len=%d",
@@ -465,6 +467,57 @@ class Solo2Device(SoloDevice):
                 self._device_uuid = self._get_uuid_from_hid(fallback)
             return fallback
         return None
+
+    def _should_retry_hid_error(self, exc: Exception) -> bool:
+        err = str(exc).lower()
+        return (
+            "wrong channel" in err
+            or "wrong_channel" in err
+            or "busy" in err
+            or "0x06" in err
+            or "6f00" in err
+            or "0x6f00" in err
+        )
+
+    def _reset_hid_channel(self, hid_device) -> None:
+        try:
+            hid_device._channel_id = 0xFFFFFFFF  # Broadcast channel
+            nonce = os.urandom(8)
+            response = hid_device.call(0x06, nonce)
+            if response[:8] == nonce:
+                (hid_device._channel_id,) = struct.unpack_from(">I", response, 8)
+        except Exception as exc:
+            _log.debug("_reset_hid_channel failed path=%r err=%s", self._hid_path, exc)
+
+    def _call_hid_command(
+        self,
+        command: int,
+        data: bytes = b"",
+        *,
+        hid_device=None,
+        retries: int = 1,
+    ) -> bytes:
+        """Send a HID vendor command with one retry for transient transport failures."""
+        last_error: Exception | None = None
+
+        for attempt in range(retries + 1):
+            device = hid_device if hid_device is not None else self.open_hid_device()
+            if device is None:
+                raise RuntimeError("Device not available")
+            try:
+                return bytes(device.call(command, data))
+            except Exception as exc:
+                last_error = exc
+                if attempt >= retries or not self._should_retry_hid_error(exc):
+                    break
+                self._reset_hid_channel(device)
+                time.sleep(0.1 * (attempt + 1))
+                if hid_device is None:
+                    self._hid_path = None
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Device not available")
 
     def open_pcsc_connection(self, *, secrets: bool = False, admin: bool = False):
         connection = open_pcsc_connection(secrets=secrets, admin=admin)

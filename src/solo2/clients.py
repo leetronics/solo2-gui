@@ -27,10 +27,7 @@ class Solo2AdminClient:
                 return connection.call_admin(command, data)
             finally:
                 connection.close()
-        hid_device = self.device.open_hid_device()
-        if hid_device is None:
-            raise RuntimeError("Device not available")
-        return bytes(hid_device.call(command, data))
+        return self.device._call_hid_command(command, data)
 
     def wink(self) -> None:
         if self.device.prefers_ccid():
@@ -70,7 +67,4 @@ class Solo2SecretsClient:
                 return connection.call_secrets(apdu)
             finally:
                 connection.close()
-        ctap2 = self.device.open_ctap2()
-        if ctap2 is None:
-            raise RuntimeError("Device not available")
-        return bytes(ctap2.device.call(0x70, apdu))
+        return self.device._call_hid_command(0x70, apdu)

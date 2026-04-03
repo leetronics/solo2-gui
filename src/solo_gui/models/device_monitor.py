@@ -26,30 +26,72 @@ class DeviceMonitor(QObject):
         self._usb_monitor: Optional[USBMonitor] = None
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
-        self._poll_timer.timeout.connect(self._scan_devices)
+        self._poll_timer.timeout.connect(self._poll_devices)
         self._missing_scans: Dict[str, int] = {}
         self._disconnect_grace_scans = 3 if sys.platform == "win32" else 1
 
     def _update_polling_state(self) -> None:
-        """Poll only while no device is connected.
+        """Keep the poll timer running once monitoring is active.
 
-        Once we have a device, rely on the USB monitor for hotplug events.
-        This avoids reopening CCID readers in the background while the GUI
-        and browser bridge are actively using the token.
+        With no connected devices we do a full discovery pass so newly plugged
+        tokens can be opened and tracked. While a device is already connected,
+        the timer switches to a lightweight presence check that only verifies
+        existing device IDs are still discoverable. This keeps Linux disconnect
+        detection working without re-opening devices in the background.
         """
-        if self._devices:
-            if self._poll_timer.isActive():
-                _log.debug(
-                    "_update_polling_state stopping background polling while connected"
-                )
-                self._poll_timer.stop()
-            return
-
         if self._usb_monitor is not None and not self._poll_timer.isActive():
             _log.debug(
-                "_update_polling_state starting background polling with no device connected"
+                "_update_polling_state starting background polling"
             )
             self._poll_timer.start()
+
+    def _poll_devices(self) -> None:
+        """Run the appropriate periodic scan for the current connection state."""
+        if self._devices:
+            self._check_tracked_devices_present()
+        else:
+            self._scan_devices()
+
+    def _current_descriptor_ids(self) -> set[str]:
+        """Return currently discoverable SoloKeys descriptor IDs."""
+        found_regular = list_regular_descriptors()
+        found_bootloader = list_bootloader_descriptors()
+        _log.debug("_current_descriptor_ids found_regular=%s", [desc.id for desc in found_regular])
+        _log.debug(
+            "_current_descriptor_ids found_bootloader=%s",
+            [desc.id for desc in found_bootloader],
+        )
+
+        current_ids = {desc.id for desc in found_regular}
+        current_ids.update(desc.id for desc in found_bootloader)
+        return current_ids
+
+    def _check_tracked_devices_present(self) -> None:
+        """Disconnect tracked devices that are no longer discoverable."""
+        current_ids = self._current_descriptor_ids()
+
+        for device_id in current_ids:
+            self._missing_scans.pop(device_id, None)
+
+        for device_id in list(self._devices.keys()):
+            if device_id in current_ids:
+                continue
+
+            misses = self._missing_scans.get(device_id, 0) + 1
+            self._missing_scans[device_id] = misses
+            if misses < self._disconnect_grace_scans:
+                _log.debug(
+                    "_check_tracked_devices_present delaying disconnect device_id=%s misses=%d/%d",
+                    device_id,
+                    misses,
+                    self._disconnect_grace_scans,
+                )
+                continue
+
+            device = self._devices.pop(device_id)
+            self._missing_scans.pop(device_id, None)
+            device.disconnect()
+            self.device_disconnected.emit(getattr(device, "path", device_id))
 
     def start_monitoring(self) -> None:
         """Start monitoring for device changes."""

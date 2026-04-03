@@ -63,6 +63,8 @@ def _try_gui_socket(msg, retries: int = 2) -> tuple[dict | None, str | None]:
     import socket as _socket
     import time
 
+    socket_exists = False
+
     for attempt in range(retries):
         try:
             if sys.platform == "win32":
@@ -73,7 +75,8 @@ def _try_gui_socket(msg, retries: int = 2) -> tuple[dict | None, str | None]:
             if not hasattr(_socket, "AF_UNIX"):
                 return None, None
 
-            if not _SOCKET_PATH.exists():
+            socket_exists = _SOCKET_PATH.exists()
+            if not socket_exists:
                 return None, None
 
             with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
@@ -106,11 +109,23 @@ def _try_gui_socket(msg, retries: int = 2) -> tuple[dict | None, str | None]:
                 )
             if attempt < retries - 1:
                 time.sleep(0.2)  # Brief wait before retry
-            continue
+                continue
+            if socket_exists:
+                return None, (
+                    "SoloKeys GUI appears to be running, but the browser bridge could not "
+                    f"talk to its local socket: {exc}. Direct fallback is disabled to avoid "
+                    "conflicting access to the token."
+                )
         except Exception:
             if attempt < retries - 1:
                 time.sleep(0.2)  # Brief wait before retry
-            continue
+                continue
+            if socket_exists:
+                return None, (
+                    "SoloKeys GUI appears to be running, but the browser bridge could not "
+                    "complete a socket request. Direct fallback is disabled to avoid "
+                    "conflicting access to the token."
+                )
     # All retries failed - fall back to direct HID
     return None, None
 
