@@ -44,11 +44,13 @@ If you are developing `solo2-python` and this GUI side by side, the GUI source t
 
 ### Linux
 
-For Linux, the recommended deployment path is a normal checkout plus a virtualenv. The AppImage build remains available, but if the desktop environment or bundled GLib stack causes trouble, run the application directly from a cloned repo instead.
+For Linux, the preferred end-user paths are native packages: `.deb` for Debian/Ubuntu-style systems and `.rpm` for Fedora/openSUSE-style systems. These packages are intentionally thin: they install the SoloKeys code, launcher, native messaging host and udev rules, but they rely on distro-provided Python/Qt packages instead of bundling a full Python runtime.
 
-For end users on Debian/Ubuntu-style systems, the preferred packaged install is now the native `.deb` artifact from Releases. It installs the desktop launcher, the Chrome/Chromium native messaging host and the SoloKeys udev rules system-wide.
+For everything else, run the application directly from a cloned repo.
 
-Install `libusb` and, if you want smartcard-backed features, `pcscd` plus the PC/SC development headers.
+The packaged Linux artifacts install the desktop launcher, the Chrome/Chromium native messaging host and the SoloKeys udev rules system-wide.
+
+Install `libusb` and, if you want smartcard-backed features, `pcscd`. For source installs, building `pyscard` may also require the PC/SC development headers.
 
 Example for Debian/Ubuntu:
 
@@ -57,6 +59,8 @@ sudo apt install -y python3-venv libusb-1.0-0
 # Optional smartcard support:
 sudo apt install -y pcscd libpcsclite-dev
 ```
+
+Packaged `.deb` installs additionally expect distro packages for `PySide6`, `fido2`, `requests`, `pyusb` and `qtawesome`. On current Debian/Ubuntu releases those are pulled in automatically by `apt install ./solokeys-gui_<version>_amd64.deb`.
 
 For non-root HID access, install udev rules for SoloKeys devices:
 
@@ -92,19 +96,22 @@ sudo apt install ./solokeys-gui_<version>_amd64.deb
 
 After installing the package, unplug and replug the SoloKey once so the fresh udev rules apply. Browser integration should already be registered system-wide for Chrome/Chromium.
 
-If you want a packaged Linux artifact anyway, the AppImage build path is still available:
+To install the packaged RPM build on Fedora/openSUSE-style systems:
 
 ```bash
-./build_linux.sh
+sudo dnf install ./solokeys-gui-<version>-1.x86_64.rpm
 ```
 
-To build the Debian package locally:
+The RPM is likewise a thin package and expects the distro to provide Python, PySide6, FIDO2, Requests, PyUSB and QtAwesome. If your RPM-based distro uses different dependency names or lacks those packages, use the source-based path above instead.
+
+To build the Linux packages locally:
 
 ```bash
 ./build_linux_deb.sh
+./build_linux_rpm.sh
 ```
 
-The AppImage is written to `dist/`. The Debian package is written to `dist/` as `solokeys-gui_<version>_<arch>.deb`. For non-Debian distros, the source-based path above remains the simplest supported fallback until native rpm packaging is added.
+The Debian package is written to `dist/` as `solokeys-gui_<version>_<arch>.deb`. The RPM package is written to `dist/` as `solokeys-gui-<version>-1.<arch>.rpm`. For distros without a native package yet, the source-based path above remains the supported fallback.
 
 ### macOS
 
@@ -144,7 +151,7 @@ The build also creates an intermediate PyInstaller app folder in `dist\SoloKeys 
 
 The application can register a native messaging host named `com.solokeys.secrets` for Chrome/Chromium. When the app starts, it attempts to register the host automatically if it is missing, and the same action is available in `Settings -> Browser`.
 
-Linux `.deb` packages install the native host manifests system-wide, so in-app registration is mainly relevant for source installs and AppImages.
+Linux native packages install the native host manifests system-wide, so in-app registration is mainly relevant for source installs and other unpackaged local runs.
 
 The native host supports two modes:
 
@@ -173,8 +180,9 @@ solokeys_gui.spec        PyInstaller spec for the desktop app
 native_host.spec         PyInstaller spec for the native host helper
 build_macos.sh           macOS packaging script
 build_linux_deb.sh       Debian/Ubuntu packaging script
+build_linux_rpm.sh       Fedora/openSUSE-style RPM packaging script
 build_windows.bat        Windows packaging script
-packaging/linux/         Linux desktop, native-host, udev and Debian package assets
+packaging/linux/         Linux desktop, native-host, udev and package build assets
 installer_windows.iss    Inno Setup script for the Windows installer
 test_*.py                Current pytest-based checks in the repo root
 ```

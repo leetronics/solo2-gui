@@ -1,0 +1,75 @@
+%global debug_package %{nil}
+
+Name:           solokeys-gui
+Version:        @RPM_VERSION@
+Release:        @RPM_RELEASE@%{?dist}
+Summary:        Desktop GUI for managing Solo 2 devices
+License:        GPL-3.0-only
+URL:            https://github.com/leetronics/solo2-gui
+BuildArch:      @RPM_ARCH@
+Source0:        @RPM_SOURCE_NAME@
+Requires:       /usr/bin/python3
+Requires:       libusb1
+Requires:       python3dist(fido2)
+Requires:       python3dist(pyside6)
+Requires:       python3dist(pyusb)
+Requires:       python3dist(qtawesome)
+Requires:       python3dist(requests)
+Recommends:     pcsc-lite
+Recommends:     python3dist(pyscard)
+
+%description
+Manage your Solo 2 device, FIDO2 resident credentials, Secrets/TOTP entries,
+firmware updates, admin features and browser integration from a desktop GUI.
+
+This package installs the Chrome/Chromium native messaging host system-wide,
+adds a desktop launcher and ships udev rules for SoloKeys HID access.
+
+%prep
+mkdir -p %{_builddir}/payload
+tar -xzf %{SOURCE0} -C %{_builddir}/payload
+
+%build
+
+%install
+rm -rf %{buildroot}
+mkdir -p %{buildroot}
+cp -a %{_builddir}/payload/. %{buildroot}/
+
+%post
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=hidraw >/dev/null 2>&1 || true
+fi
+
+%postun
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
+
+%files
+/usr/lib/solokeys-gui/
+/usr/bin/solokeys-gui
+/usr/bin/solokeys-secrets-host
+/usr/share/applications/solokeys-gui.desktop
+/usr/share/icons/hicolor/256x256/apps/solokeys-gui.png
+/etc/opt/chrome/native-messaging-hosts/com.solokeys.secrets.json
+/etc/chromium/native-messaging-hosts/com.solokeys.secrets.json
+/etc/chromium-browser/native-messaging-hosts/com.solokeys.secrets.json
+/lib/udev/rules.d/70-solokeys.rules
+
+%changelog
+* @RPM_CHANGELOG_DATE@ SoloKeys GUI Team <opensource@solokeys.dev> - @RPM_VERSION@-@RPM_RELEASE@
+- Package SoloKeys GUI for RPM-based Linux distributions

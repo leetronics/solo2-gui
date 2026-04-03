@@ -160,7 +160,7 @@ class SettingsTab(QWidget):
 
         host_info = QLabel(
             "The native messaging host allows the Chrome extension to access your SoloKeys "
-            "directly via HID. Source installs and AppImages register it per user account. "
+            "directly via HID. Source installs and unpackaged local runs register it per user account. "
             "Linux system packages may install it system-wide."
         )
         host_info.setWordWrap(True)

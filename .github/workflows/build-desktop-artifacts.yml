@@ -181,14 +181,14 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev libusb-1.0-0-dev libpcsclite-dev libfuse2
+          sudo apt-get install -y dpkg-dev rpm
 
       - name: Build Linux artifacts
         run: |
-          chmod +x build_linux.sh
           chmod +x build_linux_deb.sh
-          ./build_linux.sh
+          chmod +x build_linux_rpm.sh
           ./build_linux_deb.sh
+          ./build_linux_rpm.sh
 
       - name: Upload Linux to draft release
         uses: softprops/action-gh-release@v2
@@ -200,5 +200,5 @@ jobs:
           make_latest: false
           overwrite_files: true
           files: |
-            dist/SoloKeys-GUI-*.AppImage
             dist/solokeys-gui_*.deb
+            dist/solokeys-gui-*.rpm
