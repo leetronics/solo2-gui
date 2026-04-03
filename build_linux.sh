@@ -78,6 +78,13 @@ fi
 # caused reproducible crashes on some desktops.
 find "dist/${APP_NAME}" -type f -name "libqgtk3.so" -delete
 
+# Prefer host XKB/X11 helper libraries. Bundling these with Qt's xcb platform
+# plugin inside an AppImage has caused hard crashes on some Linux desktops.
+find "dist/${APP_NAME}" -type f \( \
+    -name "libxkbcommon.so*" -o \
+    -name "libxkbcommon-x11.so*" \
+\) -delete
+
 # ---------------------------------------------------------------------------
 # 5. Run PyInstaller for native messaging host
 # ---------------------------------------------------------------------------
@@ -140,6 +147,7 @@ unset GTK_IM_MODULE_FILE
 unset QT_PLUGIN_PATH
 unset QML2_IMPORT_PATH
 unset QT_QPA_PLATFORMTHEME
+export QT_XKB_CONFIG_ROOT="/usr/share/X11/xkb"
 export GIO_MODULE_DIR="${HERE}/usr/lib/gio/modules"
 export GDK_PIXBUF_MODULEDIR="${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
 export GDK_PIXBUF_MODULE_FILE="${HERE}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
