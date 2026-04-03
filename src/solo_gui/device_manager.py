@@ -10,7 +10,7 @@ from enum import Enum, auto
 from queue import Empty, Queue
 from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Signal
 from fido2.ctap2 import Ctap2
 from fido2.ctap2.credman import CredentialManagement
 from fido2.ctap2.pin import ClientPin
@@ -82,7 +82,7 @@ class DeviceManager(QObject):
         self._cached_pin: Optional[str] = None
         self._last_auth_error: Optional[str] = None
         self._request_queue: Queue = Queue()
-        self._worker_thread: Optional[QThread] = None
+        self._worker_thread: Optional[threading.Thread] = None
         self._running = False
         self._mutex = threading.Lock()
     
@@ -90,16 +90,34 @@ class DeviceManager(QObject):
         """Start the device manager with the given device."""
         with self._lock:
             if self._running:
-                return True
+                current_path = getattr(self._device, "path", None)
+                new_path = getattr(device, "path", None)
+                if self._device is device or current_path == new_path:
+                    return True
+
+                _log.debug(
+                    "start(): switching DeviceManager device old=%r new=%r",
+                    current_path,
+                    new_path,
+                )
+                self._running = False
+                self._cached_pin = None
+                self._request_queue.put(None)
+
+                if self._worker_thread:
+                    self._worker_thread.join(timeout=2.0)
+                    self._worker_thread = None
+
+                self._close_device()
+                self._request_queue = Queue()
 
             self._device = device
             if not self._open_device():
                 return False
 
             self._running = True
-            self._worker_thread = QThread()
-            self.moveToThread(self._worker_thread)
-            self._worker_thread.started.connect(self._process_loop)
+            self._request_queue = Queue()
+            self._worker_thread = threading.Thread(target=self._process_loop, daemon=True)
             self._worker_thread.start()
 
             self.device_connected.emit(device.path)
@@ -116,11 +134,11 @@ class DeviceManager(QObject):
             self._request_queue.put(None)
             
             if self._worker_thread:
-                self._worker_thread.quit()
-                self._worker_thread.wait()
+                self._worker_thread.join(timeout=2.0)
                 self._worker_thread = None
             
             self._close_device()
+            self._request_queue = Queue()
             self.device_disconnected.emit()
     
     def _open_device(self) -> bool:
@@ -189,7 +207,6 @@ class DeviceManager(QObject):
             time.sleep(0.25)
         return False
     
-    @Slot()
     def _process_loop(self):
         """Main processing loop - runs in worker thread."""
         while self._running:
@@ -416,7 +433,33 @@ class DeviceManager(QObject):
             response = self._ctap2.device.call(command, data)
             request.callback(response, None)
         except Exception as e:
-            request.callback(None, str(e))
+            error_msg = str(e)
+            retryable = (
+                "wrong channel" in error_msg.lower()
+                or "wrong_channel" in error_msg.lower()
+                or "6f00" in error_msg.lower()
+                or "0x6f00" in error_msg.lower()
+                or "device not available" in error_msg.lower()
+                or "not connected" in error_msg.lower()
+            )
+            if retryable and self._reopen_device():
+                try:
+                    command = request.args['command']
+                    data = request.args['data']
+                    if self._ctap2 is None and self._device is not None:
+                        if command == 0x70:
+                            response = self._device.secrets().send_apdu(data)
+                        else:
+                            response = self._device.admin().call(command, data)
+                        request.callback(response, None)
+                        return
+                    response = self._ctap2.device.call(command, data)
+                    request.callback(response, None)
+                    return
+                except Exception as e2:
+                    request.callback(None, str(e2))
+                    return
+            request.callback(None, error_msg)
     
     def _do_reset(self, request: DeviceRequest):
         """Execute RESET request."""
@@ -567,7 +610,29 @@ class DeviceManager(QObject):
             response = self._ctap2.device.call(0x70, bytes(apdu_bytes))
             request.callback(response, None)
         except Exception as e:
-            request.callback(None, str(e))
+            error_msg = str(e)
+            retryable = (
+                "wrong channel" in error_msg.lower()
+                or "wrong_channel" in error_msg.lower()
+                or "6f00" in error_msg.lower()
+                or "0x6f00" in error_msg.lower()
+                or "device not available" in error_msg.lower()
+                or "not connected" in error_msg.lower()
+            )
+            if retryable and self._reopen_device():
+                try:
+                    apdu_bytes = request.args['apdu_bytes']
+                    if self._ctap2 is None and self._device is not None:
+                        response = self._device.secrets().send_apdu(bytes(apdu_bytes))
+                        request.callback(response, None)
+                        return
+                    response = self._ctap2.device.call(0x70, bytes(apdu_bytes))
+                    request.callback(response, None)
+                    return
+                except Exception as e2:
+                    request.callback(None, str(e2))
+                    return
+            request.callback(None, error_msg)
 
     def _do_change_pin(self, request: DeviceRequest):
         """Execute CHANGE_PIN request."""

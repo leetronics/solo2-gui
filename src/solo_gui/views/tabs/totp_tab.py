@@ -696,7 +696,7 @@ class TotpTab(QWidget):
         self._setup_worker()
         self._tools_tab.set_device(device)
         self._set_controls_enabled(True)
-        self.totp_available.emit(False)
+        self.totp_available.emit(self._should_show_tab())
         self._check_status()
 
     def clear_device(self) -> None:
