@@ -59,6 +59,21 @@ def _get_card_colors() -> dict:
             'secondary_text': '#666',
         }
 
+
+def _get_warning_colors() -> dict:
+    """Get theme-aware colors for warning banners."""
+    if _is_dark_mode():
+        return {
+            'bg': '#4a3b12',
+            'border': '#8a6d1f',
+            'text': '#f3e3a1',
+        }
+    return {
+        'bg': '#fff3cd',
+        'border': '#e0c36d',
+        'text': '#664d03',
+    }
+
 from solo_gui.models.device import SoloDevice
 from solo_gui.models.device import firmware_supports_extended_applets
 from solo_gui.workers.piv_worker import (
@@ -418,12 +433,17 @@ class PivTab(QWidget):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
+        warning_colors = _get_warning_colors()
+        warning_style = (
+            f"background-color: {warning_colors['bg']}; "
+            f"border: 1px solid {warning_colors['border']}; "
+            f"color: {warning_colors['text']}; "
+            "padding: 10px; border-radius: 5px;"
+        )
 
         # PCSC not running warning (shown when PCSC service is unavailable)
         self._pcsc_warning_label = QLabel(_get_pcsc_help_text())
-        self._pcsc_warning_label.setStyleSheet(
-            "background-color: #fff3cd; padding: 10px; border-radius: 5px;"
-        )
+        self._pcsc_warning_label.setStyleSheet(warning_style)
         self._pcsc_warning_label.setVisible(False)
         layout.addWidget(self._pcsc_warning_label)
 
@@ -432,9 +452,7 @@ class PivTab(QWidget):
             lib_warning_label = QLabel(
                 _get_pcsc_help_text() + "\n  • pip install pyscard"
             )
-            lib_warning_label.setStyleSheet(
-                "background-color: #fff3cd; padding: 10px; border-radius: 5px;"
-            )
+            lib_warning_label.setStyleSheet(warning_style)
             layout.addWidget(lib_warning_label)
 
         # --- Slot cards scroll area ---

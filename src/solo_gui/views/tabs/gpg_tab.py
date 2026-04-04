@@ -69,6 +69,21 @@ def _get_card_colors() -> dict:
         }
 
 
+def _get_warning_colors() -> dict:
+    """Get theme-aware colors for warning banners."""
+    if _is_dark_mode():
+        return {
+            'bg': '#4a3b12',
+            'border': '#8a6d1f',
+            'text': '#f3e3a1',
+        }
+    return {
+        'bg': '#fff3cd',
+        'border': '#e0c36d',
+        'text': '#664d03',
+    }
+
+
 def _get_pcsc_help_text() -> str:
     """Get platform-specific PCSC help text."""
     system = platform.system()
@@ -447,12 +462,17 @@ class GpgTab(QWidget):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
+        warning_colors = _get_warning_colors()
+        warning_style = (
+            f"background-color: {warning_colors['bg']}; "
+            f"border: 1px solid {warning_colors['border']}; "
+            f"color: {warning_colors['text']}; "
+            "padding: 10px; border-radius: 5px;"
+        )
 
         # PCSC not running warning
         self._pcsc_warning_label = QLabel(_get_pcsc_help_text())
-        self._pcsc_warning_label.setStyleSheet(
-            "background-color: #fff3cd; padding: 10px; border-radius: 5px;"
-        )
+        self._pcsc_warning_label.setStyleSheet(warning_style)
         self._pcsc_warning_label.setVisible(False)
         layout.addWidget(self._pcsc_warning_label)
 
@@ -461,9 +481,7 @@ class GpgTab(QWidget):
             lib_warning = QLabel(
                 _get_pcsc_help_text() + "\n  • pip install pyscard"
             )
-            lib_warning.setStyleSheet(
-                "background-color: #fff3cd; padding: 10px; border-radius: 5px;"
-            )
+            lib_warning.setStyleSheet(warning_style)
             layout.addWidget(lib_warning)
 
         import_actions = QHBoxLayout()
@@ -481,9 +499,7 @@ class GpgTab(QWidget):
         layout.addLayout(import_actions)
 
         self._import_warning_label = QLabel(_missing_gnupg_help_text())
-        self._import_warning_label.setStyleSheet(
-            "background-color: #fff3cd; padding: 10px; border-radius: 5px;"
-        )
+        self._import_warning_label.setStyleSheet(warning_style)
         self._import_warning_label.setVisible(not self._gnupg_import_available)
         layout.addWidget(self._import_warning_label)
 
