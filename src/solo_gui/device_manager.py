@@ -588,7 +588,12 @@ class DeviceManager(QObject):
             if self._client_pin is None:
                 self._client_pin = ClientPin(self._ctap2)
             self._client_pin.set_pin(new_pin)
-            self._cached_pin = new_pin
+            # Setting a fresh PIN does not unlock credential management.
+            # Force the next operation to request and establish a new auth token.
+            self._cached_pin = None
+            self._client_pin = None
+            self._pin_token = None
+            self._credman = None
             _log.debug("_do_set_pin: OK")
             request.callback(True, None)
         except Exception as e:
@@ -648,6 +653,7 @@ class DeviceManager(QObject):
                 self._client_pin = ClientPin(self._ctap2)
             self._client_pin.change_pin(current_pin, new_pin)
             self._cached_pin = new_pin
+            self._client_pin = None
             self._pin_token = None
             self._credman = None
             request.callback(True, None)

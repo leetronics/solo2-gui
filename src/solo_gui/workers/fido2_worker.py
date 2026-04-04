@@ -151,8 +151,10 @@ class Fido2Worker(QObject):
                 else:
                     self.pin_changed.emit(False, f"Failed to set PIN: {error}")
             else:
-                self._pin = new_pin
-                self._device_manager.set_cached_pin(new_pin)
+                # A freshly set PIN should be re-entered on the next privileged
+                # operation so the GUI establishes a clean auth session.
+                self._pin = None
+                self._device_manager.clear_cached_pin()
                 self.pin_changed.emit(True, "")
         
         self._device_manager.set_pin(new_pin, on_set, operation_id="fido2_set_pin")
