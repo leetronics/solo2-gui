@@ -10,6 +10,8 @@ from PySide6.QtCore import QObject, Signal
 from solo2.secrets import (
     Algorithm,
     Credential,
+    HMAC_SLOT_NAMES,
+    HMAC_SLOT_NUMBERS,
     HmacSlotInfo,
     OtpKind,
     OtpResult,
@@ -42,7 +44,7 @@ class TotpWorker(QObject):
     reverse_hotp_verified = Signal(bool, str)
     hmac_slots_loaded = Signal(list)
     hmac_slot_configured = Signal(bool, str, object)
-    hmac_slot_removed = Signal(bool, str)
+    hmac_slot_removed = Signal(bool, str, int)
     hmac_calculated = Signal(str)
     pin_verified = Signal(bool, str)
     pin_changed = Signal(bool, str)
@@ -203,10 +205,10 @@ class TotpWorker(QObject):
     def generate_hmac_secret(self) -> bytes:
         return self._session.generate_hmac_secret()
 
-    def configure_hmac_slot(self, secret: bytes | str, *, overwrite: bool = False) -> None:
+    def configure_hmac_slot(self, slot: int, secret: bytes | str, *, overwrite: bool = False) -> None:
         try:
             slot_info = self._session.configure_hmac_slot(
-                KEEPASSXC_HMAC_SLOT,
+                slot,
                 normalize_hmac_secret(secret),
                 overwrite=overwrite,
             )
@@ -220,18 +222,18 @@ class TotpWorker(QObject):
         except Exception as exc:
             self.hmac_slot_configured.emit(False, str(exc), None)
 
-    def delete_hmac_slot(self) -> None:
+    def delete_hmac_slot(self, slot: int) -> None:
         try:
-            self._session.delete_hmac_slot(KEEPASSXC_HMAC_SLOT)
-            self.hmac_slot_removed.emit(True, "")
+            self._session.delete_hmac_slot(slot)
+            self.hmac_slot_removed.emit(True, "", slot)
         except Solo2PinRequiredError:
             self.pin_required.emit()
-            self.hmac_slot_removed.emit(False, "PIN required")
+            self.hmac_slot_removed.emit(False, "PIN required", slot)
         except Solo2TouchRequiredError:
             self.touch_required.emit()
-            self.hmac_slot_removed.emit(False, "Touch required")
+            self.hmac_slot_removed.emit(False, "Touch required", slot)
         except Exception as exc:
-            self.hmac_slot_removed.emit(False, str(exc))
+            self.hmac_slot_removed.emit(False, str(exc), slot)
 
     def calculate_hmac(self, slot: int, challenge: bytes) -> None:
         try:
@@ -296,6 +298,8 @@ Supported Commands:
 __all__ = [
     "Algorithm",
     "Credential",
+    "HMAC_SLOT_NAMES",
+    "HMAC_SLOT_NUMBERS",
     "HmacSlotInfo",
     "KEEPASSXC_HMAC_NAME",
     "KEEPASSXC_HMAC_SLOT",
