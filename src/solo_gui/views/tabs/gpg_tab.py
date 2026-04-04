@@ -2,6 +2,7 @@
 
 import os
 import platform
+import shutil
 from typing import Optional, Dict
 
 from PySide6.QtWidgets import (
@@ -21,6 +22,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QTextEdit,
+    QFileDialog,
+    QInputDialog,
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
@@ -28,6 +31,7 @@ from PySide6.QtGui import QGuiApplication
 from solo_gui.models.device import SoloDevice, firmware_supports_extended_applets
 from solo_gui.workers.gpg_worker import (
     GpgWorker,
+    GpgImportCandidate,
     GpgKeyInfo,
     GpgKeySlot,
     PCSC_AVAILABLE,
@@ -90,6 +94,29 @@ def _get_pcsc_help_text() -> str:
             "  • sudo dnf install pcsc-lite  (Fedora)\n"
             "  • sudo systemctl start pcscd"
         )
+
+
+def _missing_gnupg_help_text() -> str:
+    """Get platform-specific help text for the GnuPG import helpers."""
+    system = platform.system()
+    if system == "Windows":
+        return (
+            "OpenPGP key import requires GnuPG tools (`gpg`, `gpg-card`, `gpgconf`).\n"
+            "Install Gpg4win, then restart the app."
+        )
+    if system == "Darwin":
+        return (
+            "OpenPGP key import requires GnuPG tools (`gpg`, `gpg-card`, `gpgconf`).\n"
+            "Install GPG Suite or Homebrew GnuPG (`brew install gnupg`), then restart the app."
+        )
+    return (
+        "OpenPGP key import requires GnuPG tools (`gpg`, `gpg-card`, `gpgconf`).\n"
+        "Install the `gnupg` package for your system, then restart the app."
+    )
+
+
+def _gnupg_import_tools_available() -> bool:
+    return all(shutil.which(tool) for tool in ("gpg", "gpg-card", "gpgconf"))
 
 
 _SLOT_META = {
@@ -214,10 +241,76 @@ class GpgPinDialog(QDialog):
         return self._new_input.text()
 
 
+class ImportBundleDialog(QDialog):
+    """Dialog for mapping imported secret keys onto OpenPGP slots."""
+
+    def __init__(
+        self,
+        slot_options: Dict[GpgKeySlot, list[tuple[str, str]]],
+        suggested: Dict[GpgKeySlot, str],
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Import OpenPGP Keys")
+        self.setModal(True)
+        self._combos: Dict[GpgKeySlot, QComboBox] = {}
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Select which imported secret keys to write to the Sign, Decrypt, and Auth slots. "
+            "Leave a slot empty if you do not want to modify it."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QFormLayout()
+        for slot in (GpgKeySlot.SIGN, GpgKeySlot.DECRYPT, GpgKeySlot.AUTH):
+            combo = QComboBox()
+            combo.addItem("Do not import", "")
+            for label, keygrip in slot_options.get(slot, []):
+                combo.addItem(label, keygrip)
+            suggested_keygrip = suggested.get(slot, "")
+            if suggested_keygrip:
+                index = combo.findData(suggested_keygrip)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            name, badge = _SLOT_META.get(slot, (str(slot), "??"))
+            form.addRow(f"{name} ({badge}):", combo)
+            self._combos[slot] = combo
+        layout.addLayout(form)
+
+        hint = QLabel(
+            "The local GnuPG installation may prompt for the exported key passphrase "
+            "or the card Admin PIN using pinentry."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _validate_and_accept(self) -> None:
+        if not any(combo.currentData() for combo in self._combos.values()):
+            QMessageBox.warning(self, "No Slots Selected", "Select at least one slot to import.")
+            return
+        self.accept()
+
+    def selected_mapping(self) -> Dict[GpgKeySlot, str]:
+        return {
+            slot: combo.currentData()
+            for slot, combo in self._combos.items()
+            if combo.currentData()
+        }
+
+
 class KeySlotCard(QFrame):
     """Card widget representing one OpenPGP key slot."""
 
     generate_requested = Signal(object)  # GpgKeySlot
+    import_requested = Signal(object)    # GpgKeySlot
     export_requested = Signal(object)    # GpgKeySlot
 
     def __init__(self, slot: GpgKeySlot, parent=None):
@@ -268,6 +361,20 @@ class KeySlotCard(QFrame):
         )
         self._btn_generate.clicked.connect(lambda: self.generate_requested.emit(self._slot))
 
+        self._btn_import = QPushButton("Import Key")
+        self._btn_import.setToolTip(
+            _missing_gnupg_help_text()
+            if not _gnupg_import_tools_available()
+            else "Import an existing secret key into this slot"
+        )
+        self._btn_import.setStyleSheet(
+            "QPushButton { border: 1px solid #bbb; border-radius: 3px; "
+            "padding: 2px 8px; } "
+            "QPushButton:hover { background: #f0f0f0; } "
+            "QPushButton:disabled { background: #aaa; }"
+        )
+        self._btn_import.clicked.connect(lambda: self.import_requested.emit(self._slot))
+
         self._btn_export = QPushButton("Export Public Key")
         self._btn_export.setToolTip("Show the public key bytes")
         self._btn_export.clicked.connect(lambda: self.export_requested.emit(self._slot))
@@ -277,6 +384,7 @@ class KeySlotCard(QFrame):
         row1.addWidget(name_label)
         row1.addStretch()
         row1.addWidget(self._btn_generate)
+        row1.addWidget(self._btn_import)
         row1.addWidget(self._btn_export)
 
         # Row 2: status info
@@ -315,6 +423,9 @@ class KeySlotCard(QFrame):
         self._btn_generate.setEnabled(enabled)
         self._btn_export.setEnabled(enabled)
 
+    def set_import_enabled(self, enabled: bool) -> None:
+        self._btn_import.setEnabled(enabled)
+
 
 class GpgTab(QWidget):
     """OpenPGP tab for managing GPG keys on the SoloKeys device."""
@@ -327,8 +438,10 @@ class GpgTab(QWidget):
         self._worker: Optional[GpgWorker] = None
         self._worker_thread: Optional[QThread] = None
         self._slot_cards: Dict[GpgKeySlot, KeySlotCard] = {}
+        self._slot_infos: Dict[GpgKeySlot, GpgKeyInfo] = {}
         self._last_pubkey_bytes: Optional[bytes] = None
         self._last_pubkey_slot: Optional[GpgKeySlot] = None
+        self._gnupg_import_available = _gnupg_import_tools_available()
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -353,6 +466,27 @@ class GpgTab(QWidget):
             )
             layout.addWidget(lib_warning)
 
+        import_actions = QHBoxLayout()
+        self._import_bundle_btn = QPushButton("Import Key Bundle")
+        self._import_bundle_btn.clicked.connect(self._import_bundle)
+        if not self._gnupg_import_available:
+            self._import_bundle_btn.setToolTip(_missing_gnupg_help_text())
+        import_actions.addWidget(self._import_bundle_btn)
+        self._import_hint_label = QLabel(
+            "Imports use the local GnuPG installation (`gpg`, `gpg-card`, `gpgconf`)."
+        )
+        self._import_hint_label.setStyleSheet("color: gray; font-size: 10px;")
+        import_actions.addWidget(self._import_hint_label)
+        import_actions.addStretch()
+        layout.addLayout(import_actions)
+
+        self._import_warning_label = QLabel(_missing_gnupg_help_text())
+        self._import_warning_label.setStyleSheet(
+            "background-color: #fff3cd; padding: 10px; border-radius: 5px;"
+        )
+        self._import_warning_label.setVisible(not self._gnupg_import_available)
+        layout.addWidget(self._import_warning_label)
+
         # Key slot cards in a scroll area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -366,8 +500,16 @@ class GpgTab(QWidget):
         for slot in (GpgKeySlot.SIGN, GpgKeySlot.DECRYPT, GpgKeySlot.AUTH):
             card = KeySlotCard(slot, self)
             card.generate_requested.connect(self._generate_key_for)
+            card.import_requested.connect(self._import_key_for)
             card.export_requested.connect(self._export_pubkey_for)
             self._slot_cards[slot] = card
+            self._slot_infos[slot] = GpgKeyInfo(
+                slot=slot,
+                has_key=False,
+                fingerprint=None,
+                algo=None,
+                created=None,
+            )
             vbox.addWidget(card)
 
         vbox.addStretch()
@@ -441,13 +583,14 @@ class GpgTab(QWidget):
 
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
-        self.gpg_availability.emit(False)
         if getattr(device.mode, "value", None) != "regular":
+            self.gpg_availability.emit(False)
             self._cleanup_worker()
             self._set_controls_enabled(False)
             self._status_label.setText("OpenPGP unavailable in bootloader mode")
             self._pcsc_warning_label.setVisible(False)
             return
+        self.gpg_availability.emit(self._should_show_tab())
         self._setup_worker()
         if self._worker:
             self._worker.probe_gpg()
@@ -456,8 +599,15 @@ class GpgTab(QWidget):
         self._device = None
         self._cleanup_worker()
         for slot, card in self._slot_cards.items():
-            card.update_key_info(GpgKeyInfo(slot=slot, has_key=False,
-                                            fingerprint=None, algo=None, created=None))
+            empty_info = GpgKeyInfo(
+                slot=slot,
+                has_key=False,
+                fingerprint=None,
+                algo=None,
+                created=None,
+            )
+            self._slot_infos[slot] = empty_info
+            card.update_key_info(empty_info)
         self._user_pin_label.setText("Unknown")
         self._admin_pin_label.setText("Unknown")
         self._status_label.setText("No device connected")
@@ -474,6 +624,7 @@ class GpgTab(QWidget):
         self._worker.gpg_probed.connect(self._on_gpg_probed)
         self._worker.status_loaded.connect(self._on_status_loaded)
         self._worker.key_generated.connect(self._on_key_generated)
+        self._worker.keys_imported.connect(self._on_keys_imported)
         self._worker.pin_changed.connect(self._on_pin_changed)
         self._worker.reset_completed.connect(self._on_reset_completed)
         self._worker.error_occurred.connect(self._on_error_occurred)
@@ -490,6 +641,10 @@ class GpgTab(QWidget):
         pcsc_ok = enabled and PCSC_AVAILABLE
         for card in self._slot_cards.values():
             card.set_controls_enabled(pcsc_ok)
+            card.set_import_enabled(pcsc_ok and self._gnupg_import_available)
+        self._import_bundle_btn.setEnabled(pcsc_ok and self._gnupg_import_available)
+        self._import_hint_label.setVisible(self._gnupg_import_available)
+        self._import_warning_label.setVisible(pcsc_ok and not self._gnupg_import_available)
         self._change_user_pin_btn.setEnabled(pcsc_ok)
         self._change_admin_pin_btn.setEnabled(pcsc_ok)
         self._reset_btn.setEnabled(pcsc_ok)
@@ -517,8 +672,7 @@ class GpgTab(QWidget):
     # ------------------------------------------------------------------
 
     def _on_gpg_probed(self, available: bool) -> None:
-        is_regular = bool(self._device) and getattr(self._device.mode, "value", None) == "regular"
-        self.gpg_availability.emit(available and is_regular)
+        self.gpg_availability.emit(self._should_show_tab())
         if available:
             self._pcsc_warning_label.setVisible(False)
             self._set_controls_enabled(True)
@@ -530,6 +684,7 @@ class GpgTab(QWidget):
     def _on_status_loaded(self, key_infos: list, pw_status: dict) -> None:
         self._set_busy(False)
         for info in key_infos:
+            self._slot_infos[info.slot] = info
             card = self._slot_cards.get(info.slot)
             if card:
                 card.update_key_info(info)
@@ -564,6 +719,28 @@ class GpgTab(QWidget):
         else:
             QMessageBox.critical(self, "Error", f"Failed to generate key: {error}")
 
+    def _on_keys_imported(self, success: bool, error: str, slots: object) -> None:
+        self._set_busy(False)
+        if success:
+            imported_slots = []
+            if isinstance(slots, list):
+                imported_slots = [
+                    _SLOT_META.get(slot, (str(slot), "??"))[0]
+                    for slot in slots
+                    if isinstance(slot, GpgKeySlot)
+                ]
+            if imported_slots:
+                QMessageBox.information(
+                    self,
+                    "Import Complete",
+                    f"Imported keys into: {', '.join(imported_slots)}.",
+                )
+            else:
+                QMessageBox.information(self, "Import Complete", "Key import completed successfully.")
+            QTimer.singleShot(200, self._reload_status)
+        else:
+            QMessageBox.critical(self, "Import Failed", error or "Failed to import keys.")
+
     def _on_pin_changed(self, success: bool, message: str) -> None:
         self._set_busy(False)
         if success:
@@ -597,6 +774,104 @@ class GpgTab(QWidget):
             self._set_busy(True, f"Generating key in {name} ({badge}) slot...")
             self._worker.generate_key(slot, dialog.get_algo(), dialog.get_admin_pin())
 
+    def _import_key_for(self, slot: GpgKeySlot) -> None:
+        if not self._worker:
+            return
+        export_path, passphrase = self._choose_import_source()
+        if not export_path:
+            return
+        candidates = self._inspect_import_candidates(export_path, passphrase)
+        if candidates is None:
+            return
+
+        compatible = [candidate for candidate in candidates if self._candidate_matches_slot(slot, candidate)]
+        if not compatible:
+            name, badge = _SLOT_META.get(slot, (str(slot), "??"))
+            QMessageBox.warning(
+                self,
+                "No Compatible Keys",
+                f"No compatible imported secret keys were found for the {name} ({badge}) slot.",
+            )
+            return
+
+        selected = compatible[0]
+        if len(compatible) > 1:
+            labels = [candidate.display_label() for candidate in compatible]
+            choice, accepted = QInputDialog.getItem(
+                self,
+                "Select Secret Key",
+                "Choose which imported secret key to write to this slot:",
+                labels,
+                0,
+                False,
+            )
+            if not accepted:
+                return
+            selected = compatible[labels.index(choice)]
+
+        if not self._candidate_recommended_for_slot(slot, selected):
+            name, badge = _SLOT_META.get(slot, (str(slot), "??"))
+            reply = QMessageBox.warning(
+                self,
+                "Unusual Slot Assignment",
+                f"The selected key does not advertise the usual usage flags for the {name} ({badge}) slot.\n\n"
+                "Import it anyway?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        if not self._confirm_overwrite_slots([slot]):
+            return
+
+        name, badge = _SLOT_META.get(slot, (str(slot), "??"))
+        self._set_busy(True, f"Importing key into {name} ({badge}) slot...")
+        self._worker.import_keys_from_export(export_path, {slot: selected.keygrip}, passphrase)
+
+    def _import_bundle(self) -> None:
+        if not self._worker:
+            return
+        export_path, passphrase = self._choose_import_source()
+        if not export_path:
+            return
+        candidates = self._inspect_import_candidates(export_path, passphrase)
+        if candidates is None:
+            return
+        if not candidates:
+            QMessageBox.warning(
+                self,
+                "No Secret Keys Found",
+                "The selected file does not contain any importable secret keys.",
+            )
+            return
+
+        slot_options = {
+            slot: [
+                (candidate.display_label(), candidate.keygrip)
+                for candidate in candidates
+                if self._candidate_matches_slot(slot, candidate)
+            ]
+            for slot in (GpgKeySlot.SIGN, GpgKeySlot.DECRYPT, GpgKeySlot.AUTH)
+        }
+        if not any(slot_options.values()):
+            QMessageBox.warning(
+                self,
+                "No Compatible Keys",
+                "No compatible imported secret keys were found for the OpenPGP slots.",
+            )
+            return
+
+        dialog = ImportBundleDialog(slot_options, self._suggest_bundle_mapping(candidates), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selected_mapping = dialog.selected_mapping()
+        if not self._confirm_overwrite_slots(list(selected_mapping)):
+            return
+
+        self._set_busy(True, "Importing selected OpenPGP keys...")
+        self._worker.import_keys_from_export(export_path, selected_mapping, passphrase)
+
     def _export_pubkey_for(self, slot: GpgKeySlot) -> None:
         """Show the last known public key for the slot, or reload status first."""
         if self._last_pubkey_bytes and self._last_pubkey_slot == slot:
@@ -608,6 +883,104 @@ class GpgTab(QWidget):
                 "Public key bytes are only available immediately after key generation.\n\n"
                 "Use 'gpg --card-status' or 'gpg --export' to export the key via GnuPG.",
             )
+
+    def _choose_import_source(self) -> tuple[Optional[str], Optional[str]]:
+        if not self._gnupg_import_available:
+            QMessageBox.warning(self, "GnuPG Required", _missing_gnupg_help_text())
+            return None, None
+        export_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Exported OpenPGP Secret Key",
+            "",
+            "OpenPGP key exports (*.asc *.pgp *.gpg *.key);;All files (*)",
+        )
+        if not export_path:
+            return None, None
+        passphrase, accepted = QInputDialog.getText(
+            self,
+            "Secret Key Passphrase",
+            "Enter the passphrase for the exported secret key, or leave it blank if the export is unprotected.",
+            QLineEdit.Password,
+        )
+        if not accepted:
+            return None, None
+        return export_path, passphrase
+
+    def _inspect_import_candidates(
+        self,
+        export_path: str,
+        passphrase: Optional[str],
+    ) -> Optional[list[GpgImportCandidate]]:
+        if not self._worker:
+            return None
+        self._set_busy(True, "Analyzing exported secret key...")
+        try:
+            return self._worker.inspect_import_file(export_path, passphrase or None)
+        except Exception as exc:
+            QMessageBox.critical(self, "Import Analysis Failed", str(exc))
+            return None
+        finally:
+            self._set_busy(False)
+
+    def _candidate_matches_slot(self, slot: GpgKeySlot, candidate: GpgImportCandidate) -> bool:
+        algorithm = candidate.algorithm.lower()
+        if slot == GpgKeySlot.DECRYPT:
+            return algorithm in {"cv25519", "nist p-256", "nistp256"}
+        return algorithm in {"ed25519", "nist p-256", "nistp256"}
+
+    def _candidate_recommended_for_slot(self, slot: GpgKeySlot, candidate: GpgImportCandidate) -> bool:
+        caps = candidate.capabilities.lower()
+        if slot == GpgKeySlot.SIGN:
+            return "s" in caps
+        if slot == GpgKeySlot.DECRYPT:
+            return "e" in caps
+        return "a" in caps
+
+    def _suggest_bundle_mapping(self, candidates: list[GpgImportCandidate]) -> Dict[GpgKeySlot, str]:
+        remaining = list(candidates)
+        suggestions: Dict[GpgKeySlot, str] = {}
+        for slot in (GpgKeySlot.SIGN, GpgKeySlot.DECRYPT, GpgKeySlot.AUTH):
+            preferred = next(
+                (
+                    candidate
+                    for candidate in remaining
+                    if self._candidate_matches_slot(slot, candidate)
+                    and self._candidate_recommended_for_slot(slot, candidate)
+                ),
+                None,
+            )
+            if preferred is None:
+                preferred = next(
+                    (
+                        candidate
+                        for candidate in remaining
+                        if self._candidate_matches_slot(slot, candidate)
+                    ),
+                    None,
+                )
+            if preferred is not None:
+                suggestions[slot] = preferred.keygrip
+                remaining.remove(preferred)
+        return suggestions
+
+    def _confirm_overwrite_slots(self, slots: list[GpgKeySlot]) -> bool:
+        occupied = [
+            _SLOT_META.get(slot, (str(slot), "??"))[0]
+            for slot in slots
+            if self._slot_infos.get(slot, GpgKeyInfo(slot, False, None, None, None)).has_key
+        ]
+        if not occupied:
+            return True
+        reply = QMessageBox.warning(
+            self,
+            "Overwrite Existing Keys",
+            "The following slots already contain keys:\n\n"
+            f"{', '.join(occupied)}\n\n"
+            "Importing will overwrite the existing card keys in those slots. Continue?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return reply == QMessageBox.Yes
 
     def _change_user_pin(self) -> None:
         if not self._worker:

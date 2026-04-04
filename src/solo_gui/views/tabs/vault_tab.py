@@ -37,6 +37,7 @@ from solo_gui.models.device import SoloDevice, firmware_supports_extended_applet
 from solo_gui.workers.totp_worker import (
     TotpWorker,
     Credential,
+    HMAC_SLOT_NAMES,
     OtpKind,
     OtherKind,
     Algorithm,
@@ -46,6 +47,9 @@ from solo_gui.workers.totp_worker import (
     encode_password_only_label,
 )
 from .secrets_tools_tab import HmacTab
+
+
+_HMAC_SLOT_LABELS = set(HMAC_SLOT_NAMES.values())
 
 
 def _is_dark_mode() -> bool:
@@ -1081,11 +1085,12 @@ class VaultTab(QWidget):
         self._credential_cards.clear()
 
         self._credentials = credentials
+        visible_count = len(self._filtered_credentials())
         if self._status and self._status.supported:
-            self._status.credentials_count = len(credentials)
+            self._status.credentials_count = visible_count
             self._status_label.setText(
                 f"Secrets App v{_format_vault_version(self._status.version)} - "
-                f"{len(credentials)}/{self._status.max_credentials} credentials"
+                f"{visible_count}/{self._status.max_credentials} credentials"
             )
         self._rebuild_cards()
 
@@ -1208,14 +1213,19 @@ class VaultTab(QWidget):
             self._credential_cards[cred.id] = card
 
     def _filtered_credentials(self) -> List[Credential]:
+        visible_credentials = [
+            cred
+            for cred in self._credentials
+            if not (cred.other == OtherKind.HMAC and cred.name in _HMAC_SLOT_LABELS)
+        ]
         mode = self._filter_combo.currentText()
         if mode == "OTP":
-            return [cred for cred in self._credentials if cred.is_otp]
+            return [cred for cred in visible_credentials if cred.is_otp]
         if mode == "Password":
-            return [cred for cred in self._credentials if cred.has_password_safe]
+            return [cred for cred in visible_credentials if cred.has_password_safe]
         if mode == "OTP + Password":
-            return [cred for cred in self._credentials if cred.is_otp and cred.has_password_safe]
-        return list(self._credentials)
+            return [cred for cred in visible_credentials if cred.is_otp and cred.has_password_safe]
+        return visible_credentials
 
     def _find_credential(self, cred_id: bytes) -> Optional[Credential]:
         for credential in self._credentials:

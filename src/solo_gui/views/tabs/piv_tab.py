@@ -541,13 +541,14 @@ class PivTab(QWidget):
     def set_device(self, device: SoloDevice) -> None:
         """Set the current device and check PIV availability."""
         self._device = device
-        self.piv_availability.emit(False)
         if getattr(device.mode, "value", None) != "regular":
+            self.piv_availability.emit(False)
             self._cleanup_worker()
             self._set_controls_enabled(False)
             self._status_label.setText("PIV unavailable in bootloader mode")
             self._pcsc_warning_label.setVisible(False)
             return
+        self.piv_availability.emit(self._should_show_tab())
         self._setup_worker()
         if self._worker:
             self._worker.probe_piv()
@@ -631,8 +632,7 @@ class PivTab(QWidget):
     # ---- Signal handlers ----
 
     def _on_piv_probed(self, available: bool) -> None:
-        is_regular = bool(self._device) and getattr(self._device.mode, "value", None) == "regular"
-        self.piv_availability.emit(available and is_regular)
+        self.piv_availability.emit(self._should_show_tab())
         if available:
             self._pcsc_warning_label.setVisible(False)
             self._set_controls_enabled(True)

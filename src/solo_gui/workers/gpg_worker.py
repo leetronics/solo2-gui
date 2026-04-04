@@ -13,7 +13,11 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
+import os
+import shutil
 import struct
+import subprocess
+import tempfile
 import time
 import platform
 
@@ -62,6 +66,27 @@ class GpgKeyInfo:
     created: Optional[str]      # ISO date string or None
 
 
+@dataclass
+class GpgImportCandidate:
+    keygrip: str
+    fingerprint: str
+    keyid: str
+    user_id: str
+    algorithm: str
+    capabilities: str
+    is_primary: bool
+    created: Optional[str]
+
+    def display_label(self) -> str:
+        role = "primary" if self.is_primary else "subkey"
+        caps = "".join(sorted(set(self.capabilities.lower())))
+        parts = [self.user_id or self.fingerprint, self.algorithm, role]
+        if caps:
+            parts.append(f"caps {caps}")
+        parts.append(f"…{self.fingerprint[-8:]}")
+        return "  ·  ".join(parts)
+
+
 # Algorithm attribute bytes for PUT DATA (tags C1/C2/C3)
 # Format: first byte = algo ID
 _ALGO_ID_EDDSA = 0x16
@@ -107,6 +132,30 @@ _SLOT_TS_TAG = {
     GpgKeySlot.DECRYPT: 0xCF,
     GpgKeySlot.AUTH:    0xD0,
 }
+
+_SLOT_KEYREF = {
+    GpgKeySlot.SIGN: "OPENPGP.1",
+    GpgKeySlot.DECRYPT: "OPENPGP.2",
+    GpgKeySlot.AUTH: "OPENPGP.3",
+}
+
+
+def _missing_gnupg_tool_message(tool: str) -> str:
+    system = platform.system()
+    if system == "Windows":
+        return (
+            f"{tool} is not installed or not in PATH.\n"
+            "Install Gpg4win so `gpg`, `gpg-card`, and `gpgconf` are available."
+        )
+    if system == "Darwin":
+        return (
+            f"{tool} is not installed or not in PATH.\n"
+            "Install GPG Suite or Homebrew GnuPG (`brew install gnupg`)."
+        )
+    return (
+        f"{tool} is not installed or not in PATH.\n"
+        "Install the `gnupg` package so `gpg`, `gpg-card`, and `gpgconf` are available."
+    )
 
 
 def _compute_v4_fingerprint(timestamp: int, fp_algo: str, pubkey_raw: bytes) -> Optional[bytes]:
@@ -243,6 +292,7 @@ class GpgWorker(QObject):
     gpg_probed = Signal(bool)                       # PCSC available + AID selectable
     status_loaded = Signal(list, dict)              # list[GpgKeyInfo], pw_status dict
     key_generated = Signal(bool, str, bytes, object)  # success, error, pubkey_bytes, slot
+    keys_imported = Signal(bool, str, object)       # success, error, list[GpgKeySlot]
     pin_changed = Signal(bool, str)                 # success, message
     reset_completed = Signal(bool, str)             # success, message
     error_occurred = Signal(str)
@@ -392,6 +442,161 @@ class GpgWorker(QObject):
             return f"SW={sw:04X} (verification failed, {retries} retries left)"
         return f"SW={sw1:02X}{sw2:02X}"
 
+    def _ensure_gpg_tool(self, tool: str) -> str:
+        path = shutil.which(tool)
+        if not path:
+            raise RuntimeError(_missing_gnupg_tool_message(tool))
+        return path
+
+    def _run_cli(
+        self,
+        args: List[str],
+        *,
+        gnupghome: str,
+        input_text: Optional[str] = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["GNUPGHOME"] = gnupghome
+        result = subprocess.run(
+            args,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        if result.returncode != 0:
+            error_text = (result.stderr or result.stdout).strip()
+            raise RuntimeError(error_text or f"{args[0]} exited with status {result.returncode}")
+        return result
+
+    def _kill_temp_agent(self, gnupghome: str) -> None:
+        gpgconf = shutil.which("gpgconf")
+        if not gpgconf:
+            return
+        env = os.environ.copy()
+        env["GNUPGHOME"] = gnupghome
+        for component in ("scdaemon", "gpg-agent"):
+            try:
+                subprocess.run(
+                    [gpgconf, "--kill", component],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception:
+                pass
+
+    def _prepare_temp_gnupg_home(self, gnupghome: str) -> None:
+        os.chmod(gnupghome, 0o700)
+        with open(os.path.join(gnupghome, "scdaemon.conf"), "w", encoding="utf-8") as handle:
+            handle.write("disable-ccid\n")
+
+    def _import_secret_key_export(
+        self,
+        gnupghome: str,
+        export_path: str,
+        passphrase: Optional[str],
+    ) -> None:
+        self._ensure_gpg_tool("gpg")
+        args = ["gpg", "--batch", "--yes"]
+        if passphrase:
+            args.extend(["--pinentry-mode", "loopback", "--passphrase", passphrase])
+        args.extend(["--import", export_path])
+        self._run_cli(args, gnupghome=gnupghome)
+
+    def _list_secret_key_candidates(self, gnupghome: str) -> List[GpgImportCandidate]:
+        result = self._run_cli(
+            ["gpg", "--batch", "--with-colons", "--with-keygrip", "--list-secret-keys"],
+            gnupghome=gnupghome,
+        )
+        candidates: List[GpgImportCandidate] = []
+        current: Optional[GpgImportCandidate] = None
+        current_user_id = ""
+        for line in result.stdout.splitlines():
+            if not line:
+                continue
+            fields = line.split(":")
+            record_type = fields[0]
+            if record_type == "sec":
+                current = GpgImportCandidate(
+                    keygrip="",
+                    fingerprint="",
+                    keyid=fields[4],
+                    user_id="",
+                    algorithm=self._format_import_algorithm(fields[3], fields[16] if len(fields) > 16 else ""),
+                    capabilities=fields[11],
+                    is_primary=True,
+                    created=_unix_to_iso(int(fields[5])) if fields[5] else None,
+                )
+                candidates.append(current)
+                current_user_id = ""
+            elif record_type == "uid" and candidates:
+                user_id = fields[9] if len(fields) > 9 else ""
+                if candidates[-1].is_primary and not candidates[-1].user_id:
+                    candidates[-1].user_id = user_id
+                    current_user_id = user_id
+            elif record_type == "ssb":
+                current = GpgImportCandidate(
+                    keygrip="",
+                    fingerprint="",
+                    keyid=fields[4],
+                    user_id=current_user_id,
+                    algorithm=self._format_import_algorithm(fields[3], fields[16] if len(fields) > 16 else ""),
+                    capabilities=fields[11],
+                    is_primary=False,
+                    created=_unix_to_iso(int(fields[5])) if fields[5] else None,
+                )
+                candidates.append(current)
+            elif record_type == "fpr" and current is not None and len(fields) > 9:
+                current.fingerprint = fields[9]
+            elif record_type == "grp" and current is not None and len(fields) > 9:
+                current.keygrip = fields[9]
+        return [candidate for candidate in candidates if candidate.fingerprint and candidate.keygrip]
+
+    def _warm_secret_key_cache(
+        self,
+        gnupghome: str,
+        fingerprints: List[str],
+        passphrase: Optional[str],
+    ) -> None:
+        if not passphrase:
+            return
+        for fingerprint in sorted(set(fingerprints)):
+            self._run_cli(
+                [
+                    "gpg",
+                    "--batch",
+                    "--yes",
+                    "--pinentry-mode",
+                    "loopback",
+                    "--passphrase",
+                    passphrase,
+                    "--armor",
+                    "--export-secret-keys",
+                    fingerprint,
+                ],
+                gnupghome=gnupghome,
+            )
+
+    def _format_import_algorithm(self, algo_id: str, curve_name: str) -> str:
+        curve = curve_name.lower()
+        if curve == "ed25519":
+            return "Ed25519"
+        if curve == "cv25519":
+            return "Cv25519"
+        if curve == "nistp256":
+            return "NIST P-256"
+        if curve_name:
+            return curve_name
+        return {
+            "18": "ECDH",
+            "19": "ECDSA",
+            "22": "EdDSA",
+            "1": "RSA",
+        }.get(algo_id, f"Algo {algo_id}")
+
     # ------------------------------------------------------------------
     # Public worker slots
     # ------------------------------------------------------------------
@@ -443,6 +648,73 @@ class GpgWorker(QObject):
         except Exception as e:
             self._disconnect()
             self.error_occurred.emit(str(e))
+
+    def inspect_import_file(
+        self,
+        export_path: str,
+        passphrase: Optional[str] = None,
+    ) -> List[GpgImportCandidate]:
+        with tempfile.TemporaryDirectory(prefix="solo2-gpg-import-") as gnupghome:
+            try:
+                self._prepare_temp_gnupg_home(gnupghome)
+                self._import_secret_key_export(gnupghome, export_path, passphrase)
+                return self._list_secret_key_candidates(gnupghome)
+            finally:
+                self._kill_temp_agent(gnupghome)
+
+    def import_keys_from_export(
+        self,
+        export_path: str,
+        slot_mapping: Dict[GpgKeySlot, str],
+        passphrase: Optional[str] = None,
+    ) -> None:
+        if not PCSC_AVAILABLE:
+            self.keys_imported.emit(False, "PCSC not available", [])
+            return
+        try:
+            self._ensure_gpg_tool("gpg")
+            self._ensure_gpg_tool("gpg-card")
+            if not slot_mapping:
+                raise RuntimeError("No target slots selected for import")
+
+            ordered_slots = [slot for slot in (GpgKeySlot.SIGN, GpgKeySlot.DECRYPT, GpgKeySlot.AUTH) if slot in slot_mapping]
+
+            with tempfile.TemporaryDirectory(prefix="solo2-gpg-import-") as gnupghome:
+                try:
+                    self._prepare_temp_gnupg_home(gnupghome)
+                    self._import_secret_key_export(gnupghome, export_path, passphrase)
+                    candidates = {
+                        candidate.keygrip: candidate
+                        for candidate in self._list_secret_key_candidates(gnupghome)
+                    }
+                    for slot in ordered_slots:
+                        if slot_mapping[slot] not in candidates:
+                            raise RuntimeError(f"Selected key for {slot.value} slot is not available in the imported keyring")
+                    self._warm_secret_key_cache(
+                        gnupghome,
+                        [candidates[slot_mapping[slot]].fingerprint for slot in ordered_slots],
+                        passphrase,
+                    )
+
+                    command = ["gpg-card", "--no-history"]
+                    for index, slot in enumerate(ordered_slots):
+                        if index:
+                            command.append("--")
+                        command.extend(
+                            [
+                                "writekey",
+                                "--force",
+                                _SLOT_KEYREF[slot],
+                                slot_mapping[slot],
+                            ]
+                        )
+                    self._run_cli(command, gnupghome=gnupghome)
+                finally:
+                    self._kill_temp_agent(gnupghome)
+
+            self.keys_imported.emit(True, "", ordered_slots)
+        except Exception as exc:
+            self.keys_imported.emit(False, str(exc), [])
 
     def generate_key(self, slot: GpgKeySlot, algo_name: str, admin_pin: str) -> None:
         """Generate a key in the given slot.
