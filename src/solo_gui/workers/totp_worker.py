@@ -10,13 +10,17 @@ from PySide6.QtCore import QObject, Signal
 from solo2.secrets import (
     Algorithm,
     Credential,
+    HmacSlotInfo,
     OtpKind,
     OtpResult,
     OtherKind,
+    KEEPASSXC_HMAC_NAME,
+    KEEPASSXC_HMAC_SLOT,
     SecretsAppStatus,
     SecretsSession,
     encode_password_only_label,
     is_password_only_label,
+    normalize_hmac_secret,
     strip_password_only_label,
 )
 from solo2.errors import Solo2PinRequiredError, Solo2TouchRequiredError
@@ -36,6 +40,9 @@ class TotpWorker(QObject):
     credential_data_loaded = Signal(object)
     otp_generated = Signal(object)
     reverse_hotp_verified = Signal(bool, str)
+    hmac_slots_loaded = Signal(list)
+    hmac_slot_configured = Signal(bool, str, object)
+    hmac_slot_removed = Signal(bool, str)
     hmac_calculated = Signal(str)
     pin_verified = Signal(bool, str)
     pin_changed = Signal(bool, str)
@@ -183,6 +190,49 @@ class TotpWorker(QObject):
         except Exception as exc:
             self.reverse_hotp_verified.emit(False, f"Verification failed: {exc}")
 
+    def load_hmac_slots(self) -> None:
+        try:
+            self.hmac_slots_loaded.emit(self._session.list_hmac_slots())
+        except Solo2PinRequiredError:
+            self.pin_required.emit()
+        except Solo2TouchRequiredError:
+            self.touch_required.emit()
+        except Exception as exc:
+            self.error_occurred.emit(f"Failed to load HMAC slot status: {exc}")
+
+    def generate_hmac_secret(self) -> bytes:
+        return self._session.generate_hmac_secret()
+
+    def configure_hmac_slot(self, secret: bytes | str, *, overwrite: bool = False) -> None:
+        try:
+            slot_info = self._session.configure_hmac_slot(
+                KEEPASSXC_HMAC_SLOT,
+                normalize_hmac_secret(secret),
+                overwrite=overwrite,
+            )
+            self.hmac_slot_configured.emit(True, "", slot_info)
+        except Solo2PinRequiredError:
+            self.pin_required.emit()
+            self.hmac_slot_configured.emit(False, "PIN required", None)
+        except Solo2TouchRequiredError:
+            self.touch_required.emit()
+            self.hmac_slot_configured.emit(False, "Touch required", None)
+        except Exception as exc:
+            self.hmac_slot_configured.emit(False, str(exc), None)
+
+    def delete_hmac_slot(self) -> None:
+        try:
+            self._session.delete_hmac_slot(KEEPASSXC_HMAC_SLOT)
+            self.hmac_slot_removed.emit(True, "")
+        except Solo2PinRequiredError:
+            self.pin_required.emit()
+            self.hmac_slot_removed.emit(False, "PIN required")
+        except Solo2TouchRequiredError:
+            self.touch_required.emit()
+            self.hmac_slot_removed.emit(False, "Touch required")
+        except Exception as exc:
+            self.hmac_slot_removed.emit(False, str(exc))
+
     def calculate_hmac(self, slot: int, challenge: bytes) -> None:
         try:
             result = self._session.calculate_hmac(slot, challenge)
@@ -246,6 +296,9 @@ Supported Commands:
 __all__ = [
     "Algorithm",
     "Credential",
+    "HmacSlotInfo",
+    "KEEPASSXC_HMAC_NAME",
+    "KEEPASSXC_HMAC_SLOT",
     "OtpKind",
     "OtpResult",
     "OtherKind",
@@ -255,5 +308,6 @@ __all__ = [
     "TotpWorker",
     "encode_password_only_label",
     "is_password_only_label",
+    "normalize_hmac_secret",
     "strip_password_only_label",
 ]

@@ -442,6 +442,12 @@ class GpgTab(QWidget):
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
         self.gpg_availability.emit(False)
+        if getattr(device.mode, "value", None) != "regular":
+            self._cleanup_worker()
+            self._set_controls_enabled(False)
+            self._status_label.setText("OpenPGP unavailable in bootloader mode")
+            self._pcsc_warning_label.setVisible(False)
+            return
         self._setup_worker()
         if self._worker:
             self._worker.probe_gpg()

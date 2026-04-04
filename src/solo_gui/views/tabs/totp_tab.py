@@ -1,4 +1,4 @@
-"""TOTP/Secrets tab for SoloKeys GUI.
+"""Vault tab for SoloKeys GUI.
 
 Provides a comprehensive interface for managing TOTP credentials,
 inspired by Nitrokey's secrets-app implementation.
@@ -45,7 +45,7 @@ from solo_gui.workers.totp_worker import (
     FirmwareExtensionSpec,
     encode_password_only_label,
 )
-from .secrets_tools_tab import SecretsToolsTab
+from .secrets_tools_tab import HmacTab
 
 
 def _is_dark_mode() -> bool:
@@ -77,6 +77,16 @@ def _get_card_colors() -> dict:
             'text': '#222',
             'secondary_text': '#666',
         }
+
+
+def _format_vault_version(version: str) -> str:
+    """Map the YKOATH-compatible app version to the Solo/Nitrokey display version."""
+    parts = version.split(".")
+    if len(parts) < 3:
+        return version
+    if parts[0] == "4":
+        return ".".join(["0", *parts[1:]])
+    return version
 
 
 class CredentialCard(QFrame):
@@ -287,7 +297,7 @@ class CredentialCard(QFrame):
 
 
 class SecretsPinDialog(QDialog):
-    """Dialog for entering Secrets app PIN."""
+    """Dialog for entering the Vault PIN."""
 
     def __init__(self, parent=None, title="Enter PIN", is_new=False):
         super().__init__(parent)
@@ -298,7 +308,7 @@ class SecretsPinDialog(QDialog):
         form = QFormLayout()
 
         if is_new:
-            layout.addWidget(QLabel("Set a PIN for the Secrets app (min 4 characters):"))
+            layout.addWidget(QLabel("Set a PIN for Vault (min 4 characters):"))
             layout.addWidget(QLabel("You may need to touch the device button to confirm."))
 
         self._pin_input = QLineEdit()
@@ -550,7 +560,7 @@ class EditPasswordDialog(QDialog):
 
 
 class TotpTab(QWidget):
-    """Unified Secrets tab for OTP and password-safe credentials."""
+    """Unified Vault tab for OTP and password-safe credentials."""
 
     totp_available = Signal(bool)  # emitted once per device connect after status probe
 
@@ -574,7 +584,7 @@ class TotpTab(QWidget):
         layout = QVBoxLayout(self)
 
         # Status Group
-        status_group = QGroupBox("Secrets App Status")
+        status_group = QGroupBox("Vault Status")
         status_layout = QVBoxLayout(status_group)
 
         status_info = QHBoxLayout()
@@ -620,7 +630,7 @@ class TotpTab(QWidget):
         secrets_page_layout.setContentsMargins(0, 0, 0, 0)
 
         # Credentials Group
-        creds_group = QGroupBox("Secrets")
+        creds_group = QGroupBox("Vault")
         creds_layout = QVBoxLayout(creds_group)
 
         filters = QHBoxLayout()
@@ -667,10 +677,10 @@ class TotpTab(QWidget):
 
         secrets_page_layout.addWidget(creds_group)
 
-        self._tools_tab = SecretsToolsTab()
+        self._hmac_tab = HmacTab()
 
         self._tabs.addTab(secrets_page, "Credentials")
-        self._tabs.addTab(self._tools_tab, "Tools")
+        self._tabs.addTab(self._hmac_tab, "HMAC")
         layout.addWidget(self._tabs)
 
         # Progress/Status bar
@@ -693,8 +703,18 @@ class TotpTab(QWidget):
     def set_device(self, device: SoloDevice) -> None:
         """Set the current device."""
         self._device = device
+        if getattr(device.mode, "value", None) != "regular":
+            self._cleanup_worker()
+            self._hmac_tab.set_device(device)
+            self._set_controls_enabled(False)
+            self.totp_available.emit(False)
+            self._status = None
+            self._status_label.setText("Vault unavailable in bootloader mode")
+            self._pin_status_label.setText("")
+            self._set_busy(False)
+            return
         self._setup_worker()
-        self._tools_tab.set_device(device)
+        self._hmac_tab.set_device(device)
         self._set_controls_enabled(True)
         self.totp_available.emit(self._should_show_tab())
         self._check_status()
@@ -703,7 +723,7 @@ class TotpTab(QWidget):
         """Clear the current device."""
         self._device = None
         self._cleanup_worker()
-        self._tools_tab.clear_device()
+        self._hmac_tab.clear_device()
         self._credentials = []
         self._status = None
         self._credential_cards.clear()
@@ -777,7 +797,7 @@ class TotpTab(QWidget):
     # =========================================================================
 
     def _check_status(self) -> None:
-        """Check secrets app status."""
+        """Check Vault status."""
         if not self._worker:
             return
         self._set_busy(True, "Checking status...")
@@ -884,32 +904,32 @@ class TotpTab(QWidget):
         self._load_password_for(credential, "edit")
 
     def _set_pin(self) -> None:
-        """Set secrets app PIN."""
+        """Set the Vault PIN."""
         if not self._worker:
             return
 
-        dialog = SecretsPinDialog(self, "Set Secrets PIN", is_new=True)
+        dialog = SecretsPinDialog(self, "Set Vault PIN", is_new=True)
         if dialog.exec() == QDialog.Accepted:
             self._set_busy(True, "Setting PIN...")
             self._worker.set_new_pin(dialog.get_pin())
 
     def _verify_pin(self) -> None:
-        """Verify/unlock secrets app."""
+        """Verify and unlock Vault."""
         if not self._worker:
             return
 
-        dialog = SecretsPinDialog(self, "Enter Secrets PIN", is_new=False)
+        dialog = SecretsPinDialog(self, "Enter Vault PIN", is_new=False)
         if dialog.exec() == QDialog.Accepted:
             self._set_busy(True, "Verifying PIN...")
             self._worker.verify_pin(dialog.get_pin())
 
     def _change_pin(self) -> None:
-        """Change the secrets app PIN."""
+        """Change the Vault PIN."""
         if not self._worker:
             return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Change Secrets PIN")
+        dialog.setWindowTitle("Change Vault PIN")
         dialog.setModal(True)
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
@@ -1008,7 +1028,8 @@ class TotpTab(QWidget):
 
         if status.supported:
             self._status_label.setText(
-                f"Secrets App v{status.version} - {status.credentials_count}/{status.max_credentials} credentials"
+                f"Vault v{_format_vault_version(status.version)} - "
+                f"{status.credentials_count}/{status.max_credentials} credentials"
             )
             self._status_label.setStyleSheet("color: green;")
 
@@ -1035,7 +1056,7 @@ class TotpTab(QWidget):
 
             self._refresh_credentials()
         else:
-            self._status_label.setText("Secrets App not available")
+            self._status_label.setText("Vault not available")
             self._status_label.setStyleSheet("color: gray;")
             self._pin_status_label.setText("")
 
@@ -1044,7 +1065,7 @@ class TotpTab(QWidget):
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Information)
         msg.setWindowTitle("Firmware Extension Required")
-        msg.setText("TOTP/Secrets functionality requires a firmware extension.")
+        msg.setText("Vault functionality requires a firmware extension.")
         msg.setDetailedText(FirmwareExtensionSpec.get_integration_plan())
         msg.exec()
 
@@ -1063,7 +1084,8 @@ class TotpTab(QWidget):
         if self._status and self._status.supported:
             self._status.credentials_count = len(credentials)
             self._status_label.setText(
-                f"Secrets App v{self._status.version} - {len(credentials)}/{self._status.max_credentials} credentials"
+                f"Vault v{_format_vault_version(self._status.version)} - "
+                f"{len(credentials)}/{self._status.max_credentials} credentials"
             )
         self._rebuild_cards()
 
@@ -1127,7 +1149,7 @@ class TotpTab(QWidget):
         """Handle PIN verification result."""
         self._set_busy(False)
         if success:
-            self._progress_label.setText("PIN verified - Secrets unlocked")
+            self._progress_label.setText("PIN verified - Vault unlocked")
             self._verify_pin_button.setEnabled(False)
             self._verify_pin_button.setVisible(False)
             self._change_pin_button.setEnabled(True)

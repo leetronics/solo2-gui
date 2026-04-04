@@ -542,6 +542,12 @@ class PivTab(QWidget):
         """Set the current device and check PIV availability."""
         self._device = device
         self.piv_availability.emit(False)
+        if getattr(device.mode, "value", None) != "regular":
+            self._cleanup_worker()
+            self._set_controls_enabled(False)
+            self._status_label.setText("PIV unavailable in bootloader mode")
+            self._pcsc_warning_label.setVisible(False)
+            return
         self._setup_worker()
         if self._worker:
             self._worker.probe_piv()

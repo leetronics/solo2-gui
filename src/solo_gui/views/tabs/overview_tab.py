@@ -5,7 +5,7 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QGroupBox, QGridLayout, QPushButton,
-    QProgressBar, QMessageBox
+    QProgressBar, QMessageBox, QLineEdit, QFileDialog
 )
 from PySide6.QtCore import Qt, QThread
 
@@ -57,6 +57,21 @@ class OverviewTab(QWidget):
         self._download_update_button.setVisible(False)
         firmware_layout.addWidget(self._download_update_button)
 
+        # Flash from File
+        flash_group = QGroupBox("Flash Firmware from File")
+        flash_layout = QVBoxLayout(flash_group)
+        file_row = QHBoxLayout()
+        self._flash_file_input = QLineEdit()
+        self._flash_file_input.setPlaceholderText("Path to firmware .bin file…")
+        file_row.addWidget(self._flash_file_input)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_firmware_file)
+        file_row.addWidget(browse_btn)
+        flash_layout.addLayout(file_row)
+        self._flash_file_btn = QPushButton("Flash File")
+        self._flash_file_btn.clicked.connect(self._flash_from_file)
+        flash_layout.addWidget(self._flash_file_btn)
+
         # Status
         status_layout = QHBoxLayout()
         status_layout.addWidget(QLabel("Status:"))
@@ -70,10 +85,12 @@ class OverviewTab(QWidget):
 
         layout.addWidget(info_group)
         layout.addWidget(firmware_group)
+        layout.addWidget(flash_group)
         layout.addLayout(status_layout)
         layout.addStretch()
 
         self._check_updates_button.setEnabled(False)
+        self._flash_file_btn.setEnabled(False)
 
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
@@ -81,6 +98,7 @@ class OverviewTab(QWidget):
         self._setup_firmware_worker()
         self._update_device_info()
         self._check_updates_button.setEnabled(True)
+        self._flash_file_btn.setEnabled(True)
 
     def clear_device(self) -> None:
         self._device = None
@@ -88,6 +106,7 @@ class OverviewTab(QWidget):
         self._cleanup_firmware_worker()
         self._clear_device_info()
         self._check_updates_button.setEnabled(False)
+        self._flash_file_btn.setEnabled(False)
 
     def _setup_firmware_worker(self) -> None:
         self._cleanup_firmware_worker()
@@ -151,6 +170,35 @@ class OverviewTab(QWidget):
             self._check_updates_button.setEnabled(False)
             self._firmware_worker.perform_update(self._firmware_info)
 
+    def _browse_firmware_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Firmware File", "", "Firmware (*.bin);;All Files (*)"
+        )
+        if path:
+            self._flash_file_input.setText(path)
+
+    def _flash_from_file(self) -> None:
+        if not self._firmware_worker:
+            return
+        path = self._flash_file_input.text().strip()
+        if not path:
+            QMessageBox.warning(self, "No File", "Select a firmware .bin file first.")
+            return
+        reply = QMessageBox.warning(
+            self,
+            "Flash Firmware",
+            f"Flash firmware from:\n{path}\n\n"
+            "The device will reboot to bootloader mode. "
+            "Do not disconnect during the process.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._set_busy(True, "Flashing firmware…")
+            self._check_updates_button.setEnabled(False)
+            self._flash_file_btn.setEnabled(False)
+            self._firmware_worker.flash_from_file(path)
+
     def _on_firmware_progress(self, progress: int, message: str) -> None:
         self._status_progress.setVisible(True)
         self._status_progress.setValue(progress)
@@ -173,7 +221,8 @@ class OverviewTab(QWidget):
 
     def _on_update_completed(self, success: bool, message: str) -> None:
         self._set_busy(False)
-        self._check_updates_button.setEnabled(True)
+        self._check_updates_button.setEnabled(self._device is not None)
+        self._flash_file_btn.setEnabled(self._device is not None)
         if success:
             QMessageBox.information(self, "Update Complete", message)
         else:
@@ -181,6 +230,7 @@ class OverviewTab(QWidget):
 
     def _on_firmware_error(self, error: str) -> None:
         self._set_busy(False)
-        self._check_updates_button.setEnabled(True)
+        self._check_updates_button.setEnabled(self._device is not None)
+        self._flash_file_btn.setEnabled(self._device is not None)
         self._status_label.setText(f"Error: {error}")
         QMessageBox.critical(self, "Firmware Error", error)

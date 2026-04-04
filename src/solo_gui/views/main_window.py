@@ -172,7 +172,7 @@ def _get_icon_path() -> "Path":
 SIDEBAR_ICONS = {
     'overview': 'fa5s.home',
     'fido2': 'fa5s.key',
-    'totp': 'fa5s.clock',
+    'totp': 'fa5s.archive',
     'piv': 'fa5s.id-card',
     'gpg': 'fa5s.lock',
     'hacker': 'fa5s.bug',
@@ -351,7 +351,7 @@ class MainWindow(QMainWindow):
         # Dynamic buttons (will be shown/hidden)
         self._piv_btn = SidebarButton("PIV", "piv", self)
         self._gpg_btn = SidebarButton("OpenPGP", "gpg", self)
-        self._totp_btn = SidebarButton("Secrets", "totp", self)
+        self._totp_btn = SidebarButton("Vault", "totp", self)
         self._hacker_btn = SidebarButton("Hacker", "hacker", self)
         
         # Add static buttons to sidebar

@@ -290,7 +290,12 @@ class Fido2Tab(QWidget):
         """Set the current device."""
         self._device = device
         self._setup_worker()
-        self._set_buttons_enabled(True)
+        self._set_buttons_enabled(self._worker is not None)
+        if getattr(device.mode, "value", None) != "regular":
+            self._pin_status_label.setText("Unavailable in bootloader mode")
+            self._status_label.setText("FIDO2 unavailable in bootloader mode")
+            self._set_transport_hint("")
+            return
         # Show the Windows CCID-only hint immediately, even if the async
         # get_info path later fails or is delayed.
         if (
