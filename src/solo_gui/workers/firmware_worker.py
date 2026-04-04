@@ -9,15 +9,13 @@ Solo2 firmware update process:
 6. Reboot back to regular mode
 """
 
-from typing import Optional, Tuple, List
+from typing import Callable, Optional
 from dataclasses import dataclass
 import os
 import time
 import hashlib
 
 from PySide6.QtCore import QObject, Signal
-import usb.core
-import usb.util
 import requests
 
 from solo2.admin import AdminSession, RebootMode
@@ -46,15 +44,9 @@ class FirmwareUpdateWorker(QObject):
     firmware_info_found = Signal(object)  # FirmwareInfo or None
     bootloader_mode_changed = Signal(bool)  # True if in bootloader mode
 
-    # Solo2 USB IDs
-    SOLO2_VID = 0x1209
-    SOLO2_PID_REGULAR = 0xBEEE  # Regular mode
-    SOLO2_PID_BOOTLOADER = 0xB000  # Bootloader mode
-
     def __init__(self, device):
         super().__init__()
         self._device = device
-        self._bootloader = None
 
     def _open_hid_device(self):
         """Open HID device connection."""
@@ -175,89 +167,6 @@ class FirmwareUpdateWorker(QObject):
             self.error_occurred.emit(f"Verification failed: {e}")
             return False
 
-    def reboot_to_bootloader(self) -> bool:
-        """Reboot device to bootloader mode using admin app command."""
-        try:
-            self.update_progress.emit(50, "Rebooting to bootloader mode...")
-
-            if not self._device:
-                self.error_occurred.emit("Device not connected")
-                return False
-
-            try:
-                AdminSession(self._device).reboot(RebootMode.BOOTLOADER)
-            except Exception:
-                pass
-
-            # Wait for device to reboot
-            self.update_progress.emit(55, "Waiting for bootloader...")
-            time.sleep(1.0)
-
-            # Check if bootloader is available
-            with BootloaderSession.find(timeout=10):
-                pass
-            self.bootloader_mode_changed.emit(True)
-            self.update_progress.emit(60, "Bootloader detected")
-            return True
-
-        except BootloaderError:
-            self.error_occurred.emit(
-                "Bootloader not detected. Please manually enter bootloader mode."
-            )
-            return False
-        except Exception as e:
-            self.error_occurred.emit(f"Failed to reboot to bootloader: {e}")
-            return False
-
-    def _find_bootloader(self) -> Optional[usb.core.Device]:
-        """Find Solo2 in bootloader mode."""
-        try:
-            device = usb.core.find(
-                idVendor=self.SOLO2_VID, idProduct=self.SOLO2_PID_BOOTLOADER
-            )
-            return device
-        except Exception:
-            return None
-
-    def flash_firmware(self, firmware_data: bytes) -> bool:
-        """Flash firmware to the device in bootloader mode."""
-        try:
-            self.update_progress.emit(65, "Preparing to flash...")
-            total = len(firmware_data)
-
-            def _progress(written: int, total_bytes: int) -> None:
-                pct = 65 + int(written / total_bytes * 25)
-                self.update_progress.emit(
-                    pct, f"Writing: {written // 1024}/{total_bytes // 1024} KB"
-                )
-
-            with BootloaderSession.find(timeout=2) as bl:
-                bl.write_flash(firmware_data, progress_cb=_progress)
-            self.update_progress.emit(90, "Verifying flash...")
-            return True
-
-        except Exception as e:
-            self.error_occurred.emit(f"Flash failed: {e}")
-            return False
-
-    def _build_write_command(self, address: int, data: bytes) -> bytes:
-        """Build write command for bootloader."""
-        # Solo2 bootloader command format (simplified):
-        # [CMD_WRITE, addr_0, addr_1, addr_2, addr_3, len_0, len_1, data...]
-        CMD_WRITE = 0x02
-        cmd = bytes(
-            [
-                CMD_WRITE,
-                (address >> 0) & 0xFF,
-                (address >> 8) & 0xFF,
-                (address >> 16) & 0xFF,
-                (address >> 24) & 0xFF,
-                len(data) & 0xFF,
-                (len(data) >> 8) & 0xFF,
-            ]
-        )
-        return cmd + data
-
     def reboot_to_regular(self) -> bool:
         """Reboot from bootloader back to regular mode."""
         try:
@@ -280,32 +189,59 @@ class FirmwareUpdateWorker(QObject):
             self.error_occurred.emit(f"Reboot failed: {e}")
             return False
 
-    def perform_update(self, firmware_info: FirmwareInfo) -> None:
-        """Perform complete firmware update process."""
+    def _read_firmware_file(self, path: str) -> Optional[bytes]:
+        """Read a local firmware file and emit a useful progress step."""
+        self.update_progress.emit(5, f"Reading {os.path.basename(path)}…")
+        try:
+            with open(path, "rb") as handle:
+                return handle.read()
+        except OSError as exc:
+            self.update_completed.emit(False, f"Cannot read file: {exc}")
+            return None
+
+    def _run_flash_flow(
+        self,
+        *,
+        firmware_loader: Callable[[], Optional[bytes]],
+        expected_hash: str = "",
+        success_message: str,
+        completion_label: str,
+    ) -> None:
+        """Shared end-to-end firmware flashing flow for all sources."""
         self.update_started.emit()
 
         try:
-            # Step 1: Download firmware
-            firmware_data = self.download_firmware(firmware_info.download_url)
+            firmware_data = firmware_loader()
             if not firmware_data:
                 return
-
-            # Step 2: Verify firmware
-            if not self.verify_firmware(firmware_data, firmware_info.checksum):
+            if not self.verify_firmware(firmware_data, expected_hash):
                 return
 
-            # Step 3: Reboot to bootloader, flash, and reboot back to firmware
             self._flash_firmware_bytes(firmware_data)
-            self.update_progress.emit(100, "Update complete!")
-            self.update_completed.emit(True, "Firmware updated successfully!")
+            self.update_progress.emit(100, completion_label)
+            self.update_completed.emit(True, success_message)
 
-        except Exception as e:
-            self.error_occurred.emit(f"Update failed: {e}")
-            # Try to recover
+        except BootloaderError as exc:
+            self.update_completed.emit(False, f"Bootloader error: {exc}")
             try:
                 self.reboot_to_regular()
             except Exception:
                 pass
+        except Exception as exc:
+            self.update_completed.emit(False, f"Flash failed: {exc}")
+            try:
+                self.reboot_to_regular()
+            except Exception:
+                pass
+
+    def perform_update(self, firmware_info: FirmwareInfo) -> None:
+        """Perform complete firmware update process."""
+        self._run_flash_flow(
+            firmware_loader=lambda: self.download_firmware(firmware_info.download_url),
+            expected_hash=firmware_info.checksum,
+            success_message="Firmware updated successfully!",
+            completion_label="Update complete!",
+        )
 
     # ------------------------------------------------------------------ flash_from_file
 
@@ -334,28 +270,11 @@ class FirmwareUpdateWorker(QObject):
 
     def flash_from_file(self, path: str) -> None:
         """Flash a local .bin via BootloaderSession (NXP blhost USB-HID protocol)."""
-        self.update_started.emit()
-        try:
-            # 1. Read + sanity-check file
-            self.update_progress.emit(5, f"Reading {os.path.basename(path)}…")
-            try:
-                with open(path, "rb") as f:
-                    firmware_data = f.read()
-            except OSError as e:
-                self.update_completed.emit(False, f"Cannot read file: {e}")
-                return
-            if not self.verify_firmware(firmware_data):
-                return
-
-            # 2. Reboot, flash, reset
-            self._flash_firmware_bytes(firmware_data)
-            self.update_progress.emit(100, "Done.")
-            self.update_completed.emit(True, "Firmware flashed successfully!")
-
-        except BootloaderError as e:
-            self.update_completed.emit(False, f"Bootloader error: {e}")
-        except Exception as e:
-            self.update_completed.emit(False, f"Flash failed: {e}")
+        self._run_flash_flow(
+            firmware_loader=lambda: self._read_firmware_file(path),
+            success_message="Firmware flashed successfully!",
+            completion_label="Done.",
+        )
 
     def factory_reset(self, confirm: bool = False) -> None:
         """Perform factory reset of the device."""
@@ -366,7 +285,7 @@ class FirmwareUpdateWorker(QObject):
         try:
             self.update_progress.emit(10, "Performing factory reset...")
 
-            if not self._device_path:
+            if not self._device:
                 self.error_occurred.emit("Device not connected")
                 return
 
