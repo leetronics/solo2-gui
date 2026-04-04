@@ -559,10 +559,10 @@ class EditPasswordDialog(QDialog):
         )
 
 
-class TotpTab(QWidget):
+class VaultTab(QWidget):
     """Unified Vault tab for OTP and password-safe credentials."""
 
-    totp_available = Signal(bool)  # emitted once per device connect after status probe
+    vault_available = Signal(bool)  # emitted once per device connect after status probe
 
     def __init__(self):
         super().__init__()
@@ -584,7 +584,7 @@ class TotpTab(QWidget):
         layout = QVBoxLayout(self)
 
         # Status Group
-        status_group = QGroupBox("Vault Status")
+        status_group = QGroupBox("Secrets App Status")
         status_layout = QVBoxLayout(status_group)
 
         status_info = QHBoxLayout()
@@ -707,7 +707,7 @@ class TotpTab(QWidget):
             self._cleanup_worker()
             self._hmac_tab.set_device(device)
             self._set_controls_enabled(False)
-            self.totp_available.emit(False)
+            self.vault_available.emit(False)
             self._status = None
             self._status_label.setText("Vault unavailable in bootloader mode")
             self._pin_status_label.setText("")
@@ -716,7 +716,7 @@ class TotpTab(QWidget):
         self._setup_worker()
         self._hmac_tab.set_device(device)
         self._set_controls_enabled(True)
-        self.totp_available.emit(self._should_show_tab())
+        self.vault_available.emit(self._should_show_tab())
         self._check_status()
 
     def clear_device(self) -> None:
@@ -1024,11 +1024,11 @@ class TotpTab(QWidget):
         self._set_busy(False)
         self._status = status
         is_regular = bool(self._device) and getattr(self._device.mode, "value", None) == "regular"
-        self.totp_available.emit(status.supported and is_regular)
+        self.vault_available.emit(status.supported and is_regular)
 
         if status.supported:
             self._status_label.setText(
-                f"Vault v{_format_vault_version(status.version)} - "
+                f"Secrets App v{_format_vault_version(status.version)} - "
                 f"{status.credentials_count}/{status.max_credentials} credentials"
             )
             self._status_label.setStyleSheet("color: green;")
@@ -1056,7 +1056,7 @@ class TotpTab(QWidget):
 
             self._refresh_credentials()
         else:
-            self._status_label.setText("Vault not available")
+            self._status_label.setText("Secrets App not available")
             self._status_label.setStyleSheet("color: gray;")
             self._pin_status_label.setText("")
 
@@ -1065,7 +1065,7 @@ class TotpTab(QWidget):
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Information)
         msg.setWindowTitle("Firmware Extension Required")
-        msg.setText("Vault functionality requires a firmware extension.")
+        msg.setText("Vault functionality requires the Secrets App firmware extension.")
         msg.setDetailedText(FirmwareExtensionSpec.get_integration_plan())
         msg.exec()
 
@@ -1084,7 +1084,7 @@ class TotpTab(QWidget):
         if self._status and self._status.supported:
             self._status.credentials_count = len(credentials)
             self._status_label.setText(
-                f"Vault v{_format_vault_version(self._status.version)} - "
+                f"Secrets App v{_format_vault_version(self._status.version)} - "
                 f"{len(credentials)}/{self._status.max_credentials} credentials"
             )
         self._rebuild_cards()

@@ -38,9 +38,8 @@ from ..device_manager import DeviceManager
 from .tabs.overview_tab import OverviewTab
 from .tabs.fido2_tab import Fido2Tab
 from .tabs.piv_tab import PivTab
-from .tabs.totp_tab import TotpTab
+from .tabs.vault_tab import VaultTab
 from .tabs.admin_tab import AdminTab
-from .tabs.hacker_tab import HackerTab
 from .tabs.settings_tab import SettingsTab
 from .tabs.gpg_tab import GpgTab
 
@@ -172,10 +171,9 @@ def _get_icon_path() -> "Path":
 SIDEBAR_ICONS = {
     'overview': 'fa5s.home',
     'fido2': 'fa5s.key',
-    'totp': 'fa5s.archive',
+    'vault': 'fa5s.archive',
     'piv': 'fa5s.id-card',
     'gpg': 'fa5s.lock',
-    'hacker': 'fa5s.bug',
     'admin': 'fa5s.shield-alt',
     'settings': 'fa5s.cog',
 }
@@ -351,14 +349,13 @@ class MainWindow(QMainWindow):
         # Dynamic buttons (will be shown/hidden)
         self._piv_btn = SidebarButton("PIV", "piv", self)
         self._gpg_btn = SidebarButton("OpenPGP", "gpg", self)
-        self._totp_btn = SidebarButton("Vault", "totp", self)
-        self._hacker_btn = SidebarButton("Hacker", "hacker", self)
+        self._vault_btn = SidebarButton("Vault", "vault", self)
         
         # Add static buttons to sidebar
         sidebar_layout.addWidget(self._overview_btn)
         sidebar_layout.addWidget(self._fido2_btn)
         
-        # Container for dynamic buttons (PIV, OpenPGP, Secrets, Hacker)
+        # Container for dynamic buttons (PIV, OpenPGP, Vault)
         self._dynamic_buttons_container = QWidget()
         self._dynamic_buttons_layout = QVBoxLayout(self._dynamic_buttons_container)
         self._dynamic_buttons_layout.setContentsMargins(0, 0, 0, 0)
@@ -392,7 +389,7 @@ class MainWindow(QMainWindow):
         """Setup tabs and link them to sidebar buttons.
 
         All tabs are added to the stacked widget once at startup in a fixed
-        order.  Dynamic tabs (PIV, Secrets, Hacker) are always present but their
+        order. Dynamic tabs (PIV, OpenPGP, Vault) are always present but their
         sidebar buttons are hidden until the device reports them as available.
         Navigation uses setCurrentWidget() so indices never matter.
         """
@@ -400,8 +397,7 @@ class MainWindow(QMainWindow):
         self._fido2_tab = Fido2Tab()
         self._piv_tab = PivTab()
         self._gpg_tab = GpgTab()
-        self._totp_tab = TotpTab()
-        self._hacker_tab = HackerTab()
+        self._vault_tab = VaultTab()
         self._admin_tab = AdminTab()
         self._settings_tab = SettingsTab(browser_server=self._browser_server)
 
@@ -411,8 +407,7 @@ class MainWindow(QMainWindow):
             self._fido2_tab,
             self._piv_tab,
             self._gpg_tab,
-            self._totp_tab,
-            self._hacker_tab,
+            self._vault_tab,
             self._admin_tab,
             self._settings_tab,
         ):
@@ -424,8 +419,7 @@ class MainWindow(QMainWindow):
             self._fido2_tab:    self._fido2_btn,
             self._piv_tab:      self._piv_btn,
             self._gpg_tab:      self._gpg_btn,
-            self._totp_tab:     self._totp_btn,
-            self._hacker_tab:   self._hacker_btn,
+            self._vault_tab:    self._vault_btn,
             self._admin_tab:    self._admin_btn,
             self._settings_tab: self._settings_btn,
         }
@@ -438,8 +432,7 @@ class MainWindow(QMainWindow):
         for btn in (
             self._piv_btn,
             self._gpg_btn,
-            self._totp_btn,
-            self._hacker_btn,
+            self._vault_btn,
         ):
             self._dynamic_buttons_layout.addWidget(btn)
             btn.setVisible(False)
@@ -459,7 +452,7 @@ class MainWindow(QMainWindow):
         self._refresh_button.clicked.connect(self._refresh_devices)
         self._piv_tab.piv_availability.connect(self._on_piv_availability)
         self._gpg_tab.gpg_availability.connect(self._on_gpg_availability)
-        self._totp_tab.totp_available.connect(self._on_totp_availability)
+        self._vault_tab.vault_available.connect(self._on_vault_availability)
 
     def _setup_menu(self) -> None:
         menubar = self.menuBar()
@@ -491,9 +484,8 @@ class MainWindow(QMainWindow):
             self._fido2_tab.clear_device()
             self._piv_tab.clear_device()
             self._gpg_tab.clear_device()
-            self._totp_tab.clear_device()
+            self._vault_tab.clear_device()
             self._admin_tab.clear_device()
-            self._hacker_tab.clear_device()
             self._settings_tab.clear_device()
 
         self._current_device = device
@@ -514,16 +506,9 @@ class MainWindow(QMainWindow):
         self._fido2_tab.set_device(device)
         self._piv_tab.set_device(device)
         self._gpg_tab.set_device(device)
-        self._totp_tab.set_device(device)
+        self._vault_tab.set_device(device)
         self._admin_tab.set_device(device)
-        self._hacker_tab.set_device(device)
         self._settings_tab.set_device(device)
-
-        # Check if device is Hacker variant and show tab accordingly
-        variant = getattr(device, '_variant', None)
-        print(f"[MainWindow] Device variant: {variant}")
-        is_hacker = variant == "Hacker"
-        self._on_hacker_availability(is_hacker)
 
         mode_label = "Bootloader" if in_bootloader else "Normal"
         self._status_bar.showMessage(f"Connected to {product} ({mode_label} mode)")
@@ -540,16 +525,14 @@ class MainWindow(QMainWindow):
         self._fido2_tab.clear_device()
         self._piv_tab.clear_device()
         self._gpg_tab.clear_device()
-        self._totp_tab.clear_device()
+        self._vault_tab.clear_device()
         self._admin_tab.clear_device()
-        self._hacker_tab.clear_device()
         self._settings_tab.clear_device()
 
         # Hide dynamic tab buttons
         self._piv_btn.setVisible(False)
         self._gpg_btn.setVisible(False)
-        self._totp_btn.setVisible(False)
-        self._hacker_btn.setVisible(False)
+        self._vault_btn.setVisible(False)
 
         # Stop DeviceManager
         self._device_manager.stop()
@@ -582,21 +565,16 @@ class MainWindow(QMainWindow):
         self._gpg_btn.setVisible(available)
         self._gpg_btn.setEnabled(available and self._current_device is not None)
 
-    def _on_totp_availability(self, available: bool) -> None:
-        self._totp_btn.setVisible(available)
-        self._totp_btn.setEnabled(available and self._current_device is not None)
-
-    def _on_hacker_availability(self, available: bool) -> None:
-        self._hacker_btn.setVisible(available)
-        self._hacker_btn.setEnabled(available and self._current_device is not None)
+    def _on_vault_availability(self, available: bool) -> None:
+        self._vault_btn.setVisible(available)
+        self._vault_btn.setEnabled(available and self._current_device is not None)
 
     def _set_tabs_enabled(self, enabled: bool) -> None:
         """Enable/disable sidebar buttons. Dynamic buttons only enabled when visible."""
         dynamic_btns = (
             self._piv_btn,
             self._gpg_btn,
-            self._totp_btn,
-            self._hacker_btn,
+            self._vault_btn,
         )
         for tab, btn in self._tab_buttons.items():
             if btn is self._settings_btn:
