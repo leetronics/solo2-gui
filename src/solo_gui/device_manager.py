@@ -15,6 +15,7 @@ from fido2.ctap2 import Ctap2
 from fido2.ctap2.credman import CredentialManagement
 from fido2.ctap2.pin import ClientPin
 from fido2.hid import CTAPHID
+from solo2.secrets import SecretsAppProtocol, SecretsSession
 
 from .models.device import SoloDevice
 
@@ -92,13 +93,14 @@ class DeviceManager(QObject):
             if self._running:
                 current_path = getattr(self._device, "path", None)
                 new_path = getattr(device, "path", None)
-                if self._device is device or current_path == new_path:
+                if self._device is device:
                     return True
 
                 _log.debug(
-                    "start(): switching DeviceManager device old=%r new=%r",
+                    "start(): switching DeviceManager device old=%r new=%r same_path=%s",
                     current_path,
                     new_path,
+                    current_path == new_path,
                 )
                 self._running = False
                 self._cached_pin = None
@@ -463,18 +465,133 @@ class DeviceManager(QObject):
     
     def _do_reset(self, request: DeviceRequest):
         """Execute RESET request."""
-        if not self._ensure_device():
+        if self._device is None:
             request.callback(None, "Device not connected")
             return
-        
+
         try:
+            # Factory reset is especially sensitive to stale HID handles on
+            # Windows after rapid replug/reboot cycles. Always open a fresh
+            # CTAP2 connection for the reset attempt instead of reusing an
+            # existing shared session.
+            self._close_device()
+            try:
+                self._ctap2 = self._device.open_ctap2()
+                if self._ctap2 is not None:
+                    self._reset_hid_channel()
+            except Exception as exc:
+                _log.debug("_do_reset: open_ctap2 failed: %s", exc)
+
+            if self._ctap2 is None:
+                request.callback(
+                    None,
+                    "Factory reset requires the FIDO2 HID interface, but no CTAP HID connection is available",
+                )
+                return
+
+            _log.debug("_do_reset: issuing CTAP authenticatorReset")
             self._ctap2.reset()
             self._cached_pin = None
             self._pin_token = None
             self._credman = None
+            verification_error = self._verify_factory_reset_effect()
+            self._close_device()
+            if verification_error:
+                request.callback(None, verification_error)
+                return
             request.callback(True, None)
         except Exception as e:
-            request.callback(None, str(e))
+            error_msg = str(e)
+            if "wrong channel" in error_msg.lower():
+                if self._reopen_device() and self._ctap2 is not None:
+                    try:
+                        _log.debug("_do_reset: retrying CTAP authenticatorReset after wrong channel")
+                        self._ctap2.reset()
+                        self._cached_pin = None
+                        self._pin_token = None
+                        self._credman = None
+                        verification_error = self._verify_factory_reset_effect()
+                        self._close_device()
+                        if verification_error:
+                            request.callback(None, verification_error)
+                            return
+                        request.callback(True, None)
+                        return
+                    except Exception as e2:
+                        request.callback(None, str(e2))
+                        return
+            request.callback(None, error_msg)
+
+    def _open_ctap2_for_reset_verification(self, timeout: float = 3.0) -> Optional[Ctap2]:
+        """Open a fresh CTAP2 handle with a short retry window after reset."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._close_device()
+            try:
+                self._ctap2 = self._device.open_ctap2() if self._device is not None else None
+                if self._ctap2 is not None:
+                    self._reset_hid_channel()
+                    return self._ctap2
+            except Exception as exc:
+                _log.debug("_open_ctap2_for_reset_verification failed: %s", exc)
+            time.sleep(0.2)
+        return None
+
+    def _verify_factory_reset_effect(self) -> Optional[str]:
+        """Verify that reset cleared FIDO2 state and reset the Secrets applet if present."""
+        if self._device is None:
+            return "Device disconnected before reset verification"
+
+        ctap2 = self._open_ctap2_for_reset_verification()
+        if ctap2 is None:
+            return "Factory reset completed, but the device could not be reopened for verification"
+
+        try:
+            info = ctap2.get_info()
+            options = dict(info.options) if info.options else {}
+            if bool(options.get("clientPin")):
+                _log.debug("_verify_factory_reset_effect: clientPin still enabled after reset")
+                return "Factory reset did not clear the FIDO2 PIN state"
+            _log.debug("_verify_factory_reset_effect: FIDO2 reset verified options=%s", options)
+        except Exception as exc:
+            _log.debug("_verify_factory_reset_effect: FIDO2 verification failed: %s", exc)
+            return f"Factory reset completed, but FIDO2 verification failed: {exc}"
+        finally:
+            self._close_device()
+
+        try:
+            session = SecretsSession(device=self._device)
+            status_before = session.get_status()
+            _log.debug(
+                "_verify_factory_reset_effect: secrets status before reset-supported cleanup supported=%s pin_set=%s count=%s",
+                status_before.supported,
+                status_before.pin_set,
+                status_before.credentials_count,
+            )
+            if not status_before.supported:
+                return None
+
+            session._send_apdu(SecretsAppProtocol.INS_RESET, p1=0xDE, p2=0xAD)
+            time.sleep(0.2)
+            status_after = session.get_status()
+            _log.debug(
+                "_verify_factory_reset_effect: secrets status after reset supported=%s pin_set=%s count=%s",
+                status_after.supported,
+                status_after.pin_set,
+                status_after.credentials_count,
+            )
+            if status_after.pin_set:
+                return "Secrets reset did not clear the Secrets PIN"
+            if status_after.credentials_count:
+                return (
+                    f"Secrets reset did not clear stored credentials "
+                    f"({status_after.credentials_count} still present)"
+                )
+        except Exception as exc:
+            _log.debug("_verify_factory_reset_effect: secrets reset/verification failed: %s", exc)
+            return f"FIDO2 reset completed, but Secrets reset failed: {exc}"
+
+        return None
     
     def _do_get_credentials(self, request: DeviceRequest):
         """Execute GET_CREDENTIALS request."""

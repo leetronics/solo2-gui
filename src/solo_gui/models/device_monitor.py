@@ -7,10 +7,75 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from ..utils.usb_monitor import USBMonitor
-from solo2 import DeviceMode, Solo2Device, SoloDevice
+from solo2 import DeviceInfo, DeviceMode, DeviceStatus, Solo2Descriptor, Solo2Device, SoloDevice
 from solo2.discovery import list_bootloader_descriptors, list_regular_descriptors
 
 _log = logging.getLogger("solo2device")
+
+try:
+    from solo2.bootloader import (
+        BOOTLOADER_PID,
+        NXP_BOOTLOADER_PID,
+        NXP_BOOTLOADER_VID,
+        SOLOKEYS_VID,
+        hid as bootloader_hid,
+    )
+except Exception:
+    BOOTLOADER_PID = Solo2Device.BOOTLOADER_PID
+    NXP_BOOTLOADER_PID = None
+    NXP_BOOTLOADER_VID = None
+    SOLOKEYS_VID = Solo2Device.SOLOKEYS_VID
+    bootloader_hid = None
+
+
+class _BootloaderPlaceholderDevice(SoloDevice):
+    """Minimal bootloader-mode device used when only HID bootloader discovery works."""
+
+    def connect(self) -> bool:
+        self.status = DeviceStatus.CONNECTED
+        return True
+
+    def disconnect(self) -> None:
+        self.status = DeviceStatus.DISCONNECTED
+
+    def get_info(self) -> DeviceInfo:
+        return DeviceInfo(path=self.path, mode=DeviceMode.BOOTLOADER, firmware_version="Bootloader")
+
+    def is_alive(self) -> bool:
+        return self.status == DeviceStatus.CONNECTED
+
+
+def _list_bootloader_descriptors_for_monitor() -> List[Solo2Descriptor]:
+    """Discover bootloader devices using the same fallback strategy as flashing."""
+    descriptors = list_bootloader_descriptors()
+    if descriptors:
+        return descriptors
+    if bootloader_hid is None:
+        return []
+
+    fallback: List[Solo2Descriptor] = []
+    for info in bootloader_hid.enumerate():
+        vid = info.get("vendor_id")
+        pid = info.get("product_id")
+        if (vid, pid) not in (
+            (SOLOKEYS_VID, BOOTLOADER_PID),
+            (NXP_BOOTLOADER_VID, NXP_BOOTLOADER_PID),
+        ):
+            continue
+        hid_path = info.get("path")
+        if hid_path is None:
+            continue
+        stable_id = f"bootloader-hid:{hid_path!r}"
+        fallback.append(
+            Solo2Descriptor(
+                id=stable_id,
+                mode=DeviceMode.BOOTLOADER,
+                path=stable_id,
+                transport="bootloader-hid",
+                hid_path=hid_path,
+            )
+        )
+    return fallback
 
 
 class DeviceMonitor(QObject):
@@ -55,7 +120,7 @@ class DeviceMonitor(QObject):
     def _current_descriptor_ids(self) -> set[str]:
         """Return currently discoverable SoloKeys descriptor IDs."""
         found_regular = list_regular_descriptors()
-        found_bootloader = list_bootloader_descriptors()
+        found_bootloader = _list_bootloader_descriptors_for_monitor()
         _log.debug("_current_descriptor_ids found_regular=%s", [desc.id for desc in found_regular])
         _log.debug(
             "_current_descriptor_ids found_bootloader=%s",
@@ -120,20 +185,30 @@ class DeviceMonitor(QObject):
             self._usb_monitor.stop()
             self._usb_monitor = None
 
+    def prepare_for_expected_reconnect(self) -> None:
+        """Drop tracked device objects before an expected reboot/reconnect.
+
+        This forces the next discovery pass to create a fresh SoloDevice even if
+        Windows reuses the same HID path or the disconnect notification is
+        missed during a fast reboot cycle.
+        """
+        for device in self._devices.values():
+            try:
+                device.disconnect()
+            except Exception:
+                pass
+        self._devices.clear()
+        self._missing_scans.clear()
+        self._update_polling_state()
+
     def _on_usb_device_connected(self, device_id: str, bus: int, address: int) -> None:
         """Handle USB device connection."""
         try:
-            if device_id not in self._devices:
-                for descriptor in list_bootloader_descriptors():
-                    if descriptor.id != device_id:
-                        continue
-                    device = Solo2Device.from_descriptor(descriptor)
-                    if device.connect():
-                        self._devices[descriptor.id] = device
-                        self._missing_scans.pop(descriptor.id, None)
-                        self.device_connected.emit(device)
-                        self._update_polling_state()
-                    break
+            # Run a full scan now and again shortly afterwards. Windows can emit
+            # the USB arrival event before the new mode is fully discoverable.
+            self._scan_devices()
+            QTimer.singleShot(750, self._scan_devices)
+            QTimer.singleShot(1500, self._scan_devices)
         except Exception:
             pass
 
@@ -155,7 +230,7 @@ class DeviceMonitor(QObject):
     def _scan_devices(self) -> None:
         """Scan for connected SoloKeys devices."""
         found_regular = list_regular_descriptors()
-        found_bootloader = list_bootloader_descriptors()
+        found_bootloader = _list_bootloader_descriptors_for_monitor()
         _log.debug("_scan_devices found_regular=%s", [desc.id for desc in found_regular])
         _log.debug("_scan_devices found_bootloader=%s", [desc.id for desc in found_bootloader])
 
@@ -203,7 +278,10 @@ class DeviceMonitor(QObject):
             if descriptor.id in self._devices:
                 continue  # Already tracked
 
-            device = Solo2Device.from_descriptor(descriptor)
+            if descriptor.transport == "bootloader-hid":
+                device = _BootloaderPlaceholderDevice(descriptor)
+            else:
+                device = Solo2Device.from_descriptor(descriptor)
             if device.connect():
                 self._devices[descriptor.id] = device
                 self._missing_scans.pop(descriptor.id, None)

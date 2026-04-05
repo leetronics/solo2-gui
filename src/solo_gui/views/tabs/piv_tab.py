@@ -105,6 +105,31 @@ def _get_action_button_colors() -> dict:
         'secondary_disabled_text': '#8a8a8a',
     }
 
+
+def _get_danger_zone_colors() -> dict:
+    """Get theme-aware colors for destructive action groups."""
+    if _is_dark_mode():
+        return {
+            'bg': '#342629',
+            'border': '#8f4d55',
+            'title_bg': '#442d31',
+            'title_text': '#ffb8bf',
+            'text': '#f0dadd',
+            'button_hover': '#463136',
+            'button_disabled_border': '#66545a',
+            'button_disabled_text': '#8b7b80',
+        }
+    return {
+        'bg': '#fff7f8',
+        'border': '#e0b6bb',
+        'title_bg': '#fff0f2',
+        'title_text': '#a23a44',
+        'text': '#6f2c33',
+        'button_hover': '#fff1f3',
+        'button_disabled_border': '#d8c2c5',
+        'button_disabled_text': '#a79698',
+    }
+
 from solo_gui.models.device import SoloDevice
 from solo_gui.models.device import firmware_supports_extended_applets
 from solo_gui.workers.piv_worker import (
@@ -499,6 +524,8 @@ class PivTab(QWidget):
         self._worker_thread: Optional[QThread] = None
         self._slot_cards: Dict[PivSlot, SlotCard] = {}
         self._last_generated_key_type: Optional[PivKeyType] = None
+        self._controls_available = False
+        self._reset_ready = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -585,19 +612,63 @@ class PivTab(QWidget):
         hint.setStyleSheet("color: gray; font-size: 10px;")
         pin_main.addWidget(hint)
 
+        reset_hint = QLabel(
+            "If both the PIN and PUK retry counters reach 0, PIV reset becomes available."
+        )
+        reset_hint.setWordWrap(True)
+        reset_hint.setStyleSheet("color: gray; font-size: 10px;")
+        pin_main.addWidget(reset_hint)
+
         # Danger zone sub-group
+        danger_colors = _get_danger_zone_colors()
         danger_group = QGroupBox("Danger Zone")
-        danger_group.setStyleSheet(
-            "QGroupBox { border: 2px solid #cc0000; color: #cc0000; }"
-        )
+        danger_group.setStyleSheet(f"""
+            QGroupBox {{
+                margin-top: 10px;
+                padding: 14px 10px 10px 10px;
+                border: 1px solid {danger_colors['border']};
+                border-radius: 8px;
+                background: {danger_colors['bg']};
+                color: {danger_colors['text']};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 10px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                background: {danger_colors['title_bg']};
+                color: {danger_colors['title_text']};
+                font-weight: 600;
+            }}
+        """)
         danger_layout = QVBoxLayout(danger_group)
-        danger_layout.addWidget(
-            QLabel("Resetting PIV requires both PIN and PUK to be blocked (0 retries).")
-        )
+        danger_layout.setContentsMargins(10, 12, 10, 10)
+        danger_info = QLabel("Resetting PIV requires both PIN and PUK to be blocked (0 retries).")
+        danger_info.setWordWrap(True)
+        danger_info.setStyleSheet(f"color: {danger_colors['text']};")
+        danger_layout.addWidget(danger_info)
         self._reset_piv_button = QPushButton("Reset PIV Applet")
-        self._reset_piv_button.setStyleSheet("color: #cc0000;")
+        self._reset_piv_button.setStyleSheet(f"""
+            QPushButton {{
+                color: {danger_colors['title_text']};
+                border: 1px solid {danger_colors['border']};
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-weight: 600;
+                background: transparent;
+            }}
+            QPushButton:hover {{
+                background: {danger_colors['button_hover']};
+            }}
+            QPushButton:disabled {{
+                border-color: {danger_colors['button_disabled_border']};
+                color: {danger_colors['button_disabled_text']};
+            }}
+        """)
         self._reset_piv_button.clicked.connect(self._reset_piv)
         danger_layout.addWidget(self._reset_piv_button)
+        self._danger_group = danger_group
 
         pin_main.addWidget(danger_group)
         layout.addWidget(pin_group)
@@ -651,6 +722,7 @@ class PivTab(QWidget):
         self._pin_status_label.setText("Unknown")
         self._puk_status_label.setText("Unknown")
         self._status_label.setText("No device connected")
+        self._reset_ready = False
         self._set_controls_enabled(False)
         self._pcsc_warning_label.setVisible(False)
 
@@ -687,13 +759,27 @@ class PivTab(QWidget):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         pcsc_enabled = enabled and PCSC_AVAILABLE
+        self._controls_available = pcsc_enabled
         for card in self._slot_cards.values():
             card.set_controls_enabled(pcsc_enabled)
         self._change_pin_button.setEnabled(pcsc_enabled)
         self._unblock_pin_button.setEnabled(pcsc_enabled)
         self._change_puk_button.setEnabled(pcsc_enabled)
-        self._reset_piv_button.setEnabled(pcsc_enabled)
         self._diagnose_button.setEnabled(pcsc_enabled)
+        self._update_reset_visibility()
+
+    def _update_reset_visibility(
+        self,
+        pin_retries: Optional[int] = None,
+        puk_retries: Optional[int] = None,
+    ) -> None:
+        if pin_retries is None and puk_retries is None:
+            self._reset_ready = False
+        else:
+            self._reset_ready = pin_retries == 0 and puk_retries == 0
+        visible = self._controls_available and self._reset_ready
+        self._danger_group.setVisible(visible)
+        self._reset_piv_button.setEnabled(visible)
 
     def _should_show_tab(self) -> bool:
         if not self._device:
@@ -812,10 +898,14 @@ class PivTab(QWidget):
         if not status.get("pcsc_available", True):
             self._pin_status_label.setText("PCSC not available")
             self._puk_status_label.setText("PCSC not available")
+            self._reset_ready = False
+            self._update_reset_visibility()
             return
         if not status.get("connected", True):
             self._pin_status_label.setText("Not connected")
             self._puk_status_label.setText("Not connected")
+            self._reset_ready = False
+            self._update_reset_visibility()
             return
 
         pin_retries = status.get("pin_retries")
@@ -827,6 +917,7 @@ class PivTab(QWidget):
         self._puk_status_label.setText(
             f"{puk_retries} retries remaining" if puk_retries is not None else "Status unknown"
         )
+        self._update_reset_visibility(pin_retries, puk_retries)
 
     def _on_pin_changed(self, success: bool, message: str) -> None:
         self._set_busy(False)

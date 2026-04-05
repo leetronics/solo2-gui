@@ -115,6 +115,31 @@ def _get_action_button_colors() -> dict:
     }
 
 
+def _get_danger_zone_colors() -> dict:
+    """Get theme-aware colors for destructive action groups."""
+    if _is_dark_mode():
+        return {
+            'bg': '#342629',
+            'border': '#8f4d55',
+            'title_bg': '#442d31',
+            'title_text': '#ffb8bf',
+            'text': '#f0dadd',
+            'button_hover': '#463136',
+            'button_disabled_border': '#66545a',
+            'button_disabled_text': '#8b7b80',
+        }
+    return {
+        'bg': '#fff7f8',
+        'border': '#e0b6bb',
+        'title_bg': '#fff0f2',
+        'title_text': '#a23a44',
+        'text': '#6f2c33',
+        'button_hover': '#fff1f3',
+        'button_disabled_border': '#d8c2c5',
+        'button_disabled_text': '#a79698',
+    }
+
+
 def _get_pcsc_help_text() -> str:
     """Get platform-specific PCSC help text."""
     system = platform.system()
@@ -523,6 +548,8 @@ class GpgTab(QWidget):
         self._last_pubkey_bytes: Optional[bytes] = None
         self._last_pubkey_slot: Optional[GpgKeySlot] = None
         self._gnupg_import_available = _gnupg_import_tools_available()
+        self._controls_available = False
+        self._reset_ready = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -628,19 +655,63 @@ class GpgTab(QWidget):
         hint.setStyleSheet("color: gray; font-size: 10px;")
         pin_main.addWidget(hint)
 
+        reset_hint = QLabel(
+            "If both the User PIN and Admin PIN retry counters reach 0, OpenPGP reset becomes available."
+        )
+        reset_hint.setWordWrap(True)
+        reset_hint.setStyleSheet("color: gray; font-size: 10px;")
+        pin_main.addWidget(reset_hint)
+
         # Danger Zone
+        danger_colors = _get_danger_zone_colors()
         danger_group = QGroupBox("Danger Zone")
-        danger_group.setStyleSheet(
-            "QGroupBox { border: 2px solid #cc0000; color: #cc0000; }"
-        )
+        danger_group.setStyleSheet(f"""
+            QGroupBox {{
+                margin-top: 10px;
+                padding: 14px 10px 10px 10px;
+                border: 1px solid {danger_colors['border']};
+                border-radius: 8px;
+                background: {danger_colors['bg']};
+                color: {danger_colors['text']};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 10px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                background: {danger_colors['title_bg']};
+                color: {danger_colors['title_text']};
+                font-weight: 600;
+            }}
+        """)
         danger_layout = QVBoxLayout(danger_group)
-        danger_layout.addWidget(
-            QLabel("Factory reset will erase all keys and restore default PINs.")
-        )
+        danger_layout.setContentsMargins(10, 12, 10, 10)
+        danger_info = QLabel("Factory reset will erase all keys and restore default PINs.")
+        danger_info.setWordWrap(True)
+        danger_info.setStyleSheet(f"color: {danger_colors['text']};")
+        danger_layout.addWidget(danger_info)
         self._reset_btn = QPushButton("Reset OpenPGP Applet")
-        self._reset_btn.setStyleSheet("color: #cc0000;")
+        self._reset_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {danger_colors['title_text']};
+                border: 1px solid {danger_colors['border']};
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-weight: 600;
+                background: transparent;
+            }}
+            QPushButton:hover {{
+                background: {danger_colors['button_hover']};
+            }}
+            QPushButton:disabled {{
+                border-color: {danger_colors['button_disabled_border']};
+                color: {danger_colors['button_disabled_text']};
+            }}
+        """)
         self._reset_btn.clicked.connect(self._factory_reset)
         danger_layout.addWidget(self._reset_btn)
+        self._danger_group = danger_group
         pin_main.addWidget(danger_group)
 
         layout.addWidget(pin_group)
@@ -693,6 +764,7 @@ class GpgTab(QWidget):
         self._user_pin_label.setText("Unknown")
         self._admin_pin_label.setText("Unknown")
         self._status_label.setText("No device connected")
+        self._reset_ready = False
         self._set_controls_enabled(False)
         self._pcsc_warning_label.setVisible(False)
 
@@ -722,6 +794,7 @@ class GpgTab(QWidget):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         pcsc_ok = enabled and PCSC_AVAILABLE
+        self._controls_available = pcsc_ok
         for card in self._slot_cards.values():
             card.set_controls_enabled(pcsc_ok)
             card.set_import_enabled(pcsc_ok and self._gnupg_import_available)
@@ -730,7 +803,20 @@ class GpgTab(QWidget):
         self._import_warning_label.setVisible(pcsc_ok and not self._gnupg_import_available)
         self._change_user_pin_btn.setEnabled(pcsc_ok)
         self._change_admin_pin_btn.setEnabled(pcsc_ok)
-        self._reset_btn.setEnabled(pcsc_ok)
+        self._update_reset_visibility()
+
+    def _update_reset_visibility(
+        self,
+        user_pin_retries: Optional[int] = None,
+        admin_pin_retries: Optional[int] = None,
+    ) -> None:
+        if user_pin_retries is None and admin_pin_retries is None:
+            self._reset_ready = False
+        else:
+            self._reset_ready = user_pin_retries == 0 and admin_pin_retries == 0
+        visible = self._controls_available and self._reset_ready
+        self._danger_group.setVisible(visible)
+        self._reset_btn.setEnabled(visible)
 
     def _should_show_tab(self) -> bool:
         if not self._device:
@@ -780,6 +866,7 @@ class GpgTab(QWidget):
         self._admin_pin_label.setText(
             f"{admin_retries} retries remaining" if admin_retries is not None else "Unknown"
         )
+        self._update_reset_visibility(user_retries, admin_retries)
 
     def _on_key_generated(self, success: bool, error: str, pubkey_bytes: bytes, slot) -> None:
         self._set_busy(False)

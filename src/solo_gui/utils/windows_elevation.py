@@ -24,14 +24,29 @@ def can_restart_as_admin() -> bool:
     return sys.platform == "win32" and not is_windows_admin()
 
 
+def _resolve_restart_executable() -> str:
+    """Prefer a windowed Python interpreter when restarting from source on Windows."""
+    executable = Path(sys.executable)
+    if getattr(sys, "frozen", False):
+        return str(executable)
+
+    lower_name = executable.name.lower()
+    if lower_name.startswith("python") or lower_name in {"py.exe", "pythond.exe"}:
+        pythonw = executable.with_name("pythonw.exe")
+        if pythonw.exists():
+            return str(pythonw)
+
+    return str(executable)
+
+
 def _build_restart_command(extra_args: list[str] | None = None) -> tuple[str, str]:
     """Build the command line used for an elevated restart on Windows."""
     extra_args = extra_args or []
     if getattr(sys, "frozen", False):
-        executable = sys.executable
+        executable = _resolve_restart_executable()
         params = subprocess.list2cmdline([*sys.argv[1:], *extra_args])
     else:
-        executable = sys.executable
+        executable = _resolve_restart_executable()
         params = subprocess.list2cmdline([sys.argv[0], *sys.argv[1:], *extra_args])
     return executable, params
 
@@ -62,3 +77,30 @@ def restart_as_admin() -> tuple[bool, str]:
         return False, f"Windows elevation failed with code {result}."
 
     return True, ""
+
+
+def restart_as_admin_from_ui(parent=None) -> bool:
+    """Trigger an elevated restart from the GUI and handle quit/error UI centrally."""
+    ok, error = restart_as_admin()
+    if ok:
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+        except Exception:
+            pass
+        return True
+
+    try:
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.critical(
+            parent,
+            "Restart Failed",
+            f"Could not restart the GUI as Administrator:\n{error}",
+        )
+    except Exception:
+        pass
+    return False

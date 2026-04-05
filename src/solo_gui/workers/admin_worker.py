@@ -142,7 +142,10 @@ class AdminWorker(QObject):
         self.operation_started.emit("Factory reset")
 
         def on_reset(result, error):
-            if error:
+            if error or not result:
+                if error is None:
+                    self.error_occurred.emit("Factory reset did not complete")
+                    return
                 err = str(error)
                 if "0x30" in err or "NOT_ALLOWED" in err:
                     self.error_occurred.emit("Reset window expired (must be within 10 s of boot). Please try again.")
@@ -153,7 +156,7 @@ class AdminWorker(QObject):
                 else:
                     self.error_occurred.emit(f"Factory reset failed: {error}")
             else:
-                self.operation_completed.emit(True, "Device has been reset to factory settings")
+                self.operation_completed.emit(True, "FIDO2 and Secrets/Vault data have been reset")
 
         self._device_manager.reset(on_reset, operation_id="admin_reset")
 

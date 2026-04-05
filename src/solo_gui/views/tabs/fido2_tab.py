@@ -1,11 +1,11 @@
 """FIDO2 tab for SoloKeys GUI."""
 
+from functools import partial
 import os
 import sys
 from typing import Optional, List, Dict
 
 from PySide6.QtWidgets import (
-    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -30,7 +30,7 @@ from solo_gui.models.device import SoloDevice
 from solo_gui.utils.windows_elevation import (
     can_restart_as_admin,
     is_windows_admin,
-    restart_as_admin,
+    restart_as_admin_from_ui,
 )
 from solo_gui.workers.fido2_worker import Fido2Worker, Fido2Credential
 
@@ -255,7 +255,7 @@ class Fido2Tab(QWidget):
 
         hint_actions_layout = QHBoxLayout()
         self._restart_admin_button = QPushButton("Restart as Administrator")
-        self._restart_admin_button.clicked.connect(self._restart_as_admin)
+        self._restart_admin_button.clicked.connect(partial(restart_as_admin_from_ui, self))
         self._restart_admin_button.setVisible(False)
         hint_actions_layout.addWidget(self._restart_admin_button)
         hint_actions_layout.addStretch()
@@ -390,18 +390,6 @@ class Fido2Tab(QWidget):
         self._transport_hint_label.setVisible(visible)
         self._transport_hint_label.setText(message)
         self._restart_admin_button.setVisible(visible and show_restart)
-
-    def _restart_as_admin(self) -> None:
-        """Restart the GUI with Windows Administrator rights."""
-        ok, error = restart_as_admin()
-        if ok:
-            QApplication.instance().quit()
-            return
-        QMessageBox.critical(
-            self,
-            "Restart Failed",
-            f"Could not restart the GUI as Administrator:\n{error}",
-        )
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
         """Set busy state with progress indicator."""

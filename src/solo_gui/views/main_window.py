@@ -249,9 +249,14 @@ class MainWindow(QMainWindow):
         self._device_manager = DeviceManager.get_instance()
         self._current_device: Optional[SoloDevice] = None
         self._refresh_timer = QTimer()
+        self._refresh_timer.setInterval(500)
+        self._refresh_timer.timeout.connect(self._run_expected_reconnect_scan)
+        self._reconnect_scan_attempts_remaining = 0
 
         # widget → sidebar button mapping (populated in _setup_tabs)
         self._tab_buttons: Dict[object, SidebarButton] = {}
+        self._last_active_tab: Optional[QWidget] = None
+        self._pending_restore_tab: Optional[QWidget] = None
 
         self._setup_ui()
         self._setup_connections()
@@ -439,17 +444,42 @@ class MainWindow(QMainWindow):
 
         self._set_tabs_enabled(False)
 
-    def _select_tab(self, tab: QWidget) -> None:
+    def _select_tab(self, tab: QWidget, remember: bool = True) -> None:
         """Show a tab and mark its sidebar button as active."""
         self._stacked_widget.setCurrentWidget(tab)
         for t, btn in self._tab_buttons.items():
             btn.setChecked(t is tab)
+        if remember:
+            self._last_active_tab = tab
+            self._pending_restore_tab = None
+
+    def _can_restore_tab(self, tab: Optional[QWidget]) -> bool:
+        if tab is None:
+            return False
+        if tab is self._settings_tab:
+            return True
+        if self._current_device is None:
+            return False
+        btn = self._tab_buttons.get(tab)
+        if btn is None:
+            return False
+        if btn in (self._piv_btn, self._gpg_btn, self._vault_btn):
+            return btn.isVisible() and btn.isEnabled()
+        return btn.isEnabled()
+
+    def _try_restore_tab(self) -> bool:
+        if not self._can_restore_tab(self._pending_restore_tab):
+            return False
+        self._select_tab(self._pending_restore_tab, remember=False)
+        self._pending_restore_tab = None
+        return True
 
     def _setup_connections(self) -> None:
         self._device_monitor.device_connected.connect(self._on_device_connected)
         self._device_monitor.device_disconnected.connect(self._on_device_disconnected)
         self._device_monitor.device_error.connect(self._on_device_monitor_error)
         self._refresh_button.clicked.connect(self._refresh_devices)
+        self._admin_tab.reconnect_expected.connect(self._begin_expected_reconnect_scan)
         self._piv_tab.piv_availability.connect(self._on_piv_availability)
         self._gpg_tab.gpg_availability.connect(self._on_gpg_availability)
         self._vault_tab.vault_available.connect(self._on_vault_availability)
@@ -509,6 +539,10 @@ class MainWindow(QMainWindow):
         self._vault_tab.set_device(device)
         self._admin_tab.set_device(device)
         self._settings_tab.set_device(device)
+        self._pending_restore_tab = self._last_active_tab
+        self._try_restore_tab()
+        self._reconnect_scan_attempts_remaining = 0
+        self._refresh_timer.stop()
 
         mode_label = "Bootloader" if in_bootloader else "Normal"
         self._status_bar.showMessage(f"Connected to {product} ({mode_label} mode)")
@@ -516,6 +550,8 @@ class MainWindow(QMainWindow):
     def _on_device_disconnected(self, path: str) -> None:
         if self._current_device is None:
             return
+        self._last_active_tab = self._stacked_widget.currentWidget()
+        self._pending_restore_tab = None
         self._current_device = None
         self._device_label.setText("No device connected")
         self._set_tabs_enabled(False)
@@ -538,7 +574,7 @@ class MainWindow(QMainWindow):
         self._device_manager.stop()
 
         # Return to overview
-        self._select_tab(self._overview_tab)
+        self._select_tab(self._overview_tab, remember=False)
 
     def _on_tab_changed(self, index: int) -> None:
         if self._current_device is None:
@@ -553,6 +589,21 @@ class MainWindow(QMainWindow):
             self._fido2_tab.refresh_state()
         self._status_bar.showMessage("Refreshing devices...")
 
+    def _begin_expected_reconnect_scan(self) -> None:
+        if self._current_device is not None:
+            self._on_device_disconnected(getattr(self._current_device, "path", ""))
+        self._device_monitor.prepare_for_expected_reconnect()
+        self._reconnect_scan_attempts_remaining = 24
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
+    def _run_expected_reconnect_scan(self) -> None:
+        if self._reconnect_scan_attempts_remaining <= 0:
+            self._refresh_timer.stop()
+            return
+        self._reconnect_scan_attempts_remaining -= 1
+        self._device_monitor.refresh_devices()
+
     def _on_device_monitor_error(self, path: str, error: str) -> None:
         QMessageBox.warning(self, "Device Error", f"Device error: {error}")
         self._status_bar.showMessage(f"Device error: {error}")
@@ -560,14 +611,29 @@ class MainWindow(QMainWindow):
     def _on_piv_availability(self, available: bool) -> None:
         self._piv_btn.setVisible(available)
         self._piv_btn.setEnabled(available and self._current_device is not None)
+        if self._pending_restore_tab is self._piv_tab:
+            if available:
+                self._try_restore_tab()
+            else:
+                self._pending_restore_tab = None
 
     def _on_gpg_availability(self, available: bool) -> None:
         self._gpg_btn.setVisible(available)
         self._gpg_btn.setEnabled(available and self._current_device is not None)
+        if self._pending_restore_tab is self._gpg_tab:
+            if available:
+                self._try_restore_tab()
+            else:
+                self._pending_restore_tab = None
 
     def _on_vault_availability(self, available: bool) -> None:
         self._vault_btn.setVisible(available)
         self._vault_btn.setEnabled(available and self._current_device is not None)
+        if self._pending_restore_tab is self._vault_tab:
+            if available:
+                self._try_restore_tab()
+            else:
+                self._pending_restore_tab = None
 
     def _set_tabs_enabled(self, enabled: bool) -> None:
         """Enable/disable sidebar buttons. Dynamic buttons only enabled when visible."""
