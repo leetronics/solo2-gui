@@ -624,6 +624,7 @@ class GpgTab(QWidget):
         self._worker.gpg_probed.connect(self._on_gpg_probed)
         self._worker.status_loaded.connect(self._on_status_loaded)
         self._worker.key_generated.connect(self._on_key_generated)
+        self._worker.public_key_exported.connect(self._on_public_key_exported)
         self._worker.keys_imported.connect(self._on_keys_imported)
         self._worker.pin_changed.connect(self._on_pin_changed)
         self._worker.reset_completed.connect(self._on_reset_completed)
@@ -718,6 +719,20 @@ class GpgTab(QWidget):
             QTimer.singleShot(200, self._reload_status)
         else:
             QMessageBox.critical(self, "Error", f"Failed to generate key: {error}")
+
+    def _on_public_key_exported(
+        self,
+        success: bool,
+        error: str,
+        pubkey_bytes: bytes,
+        slot,
+        algo,
+    ) -> None:
+        self._set_busy(False)
+        if success:
+            self._show_pubkey_dialog(pubkey_bytes, slot, algorithm=algo)
+        else:
+            QMessageBox.critical(self, "Export Public Key", error or "Failed to export public key.")
 
     def _on_keys_imported(self, success: bool, error: str, slots: object) -> None:
         self._set_busy(False)
@@ -873,16 +888,15 @@ class GpgTab(QWidget):
         self._worker.import_keys_from_export(export_path, selected_mapping, passphrase)
 
     def _export_pubkey_for(self, slot: GpgKeySlot) -> None:
-        """Show the last known public key for the slot, or reload status first."""
+        """Read the current public key from the card and show it."""
+        if not self._worker:
+            return
         if self._last_pubkey_bytes and self._last_pubkey_slot == slot:
             self._show_pubkey_dialog(self._last_pubkey_bytes, slot)
-        else:
-            QMessageBox.information(
-                self,
-                "Export Public Key",
-                "Public key bytes are only available immediately after key generation.\n\n"
-                "Use 'gpg --card-status' or 'gpg --export' to export the key via GnuPG.",
-            )
+            return
+        name, badge = _SLOT_META.get(slot, (str(slot), "??"))
+        self._set_busy(True, f"Reading public key from {name} ({badge}) slot...")
+        self._worker.export_public_key(slot)
 
     def _choose_import_source(self) -> tuple[Optional[str], Optional[str]]:
         if not self._gnupg_import_available:
@@ -1023,25 +1037,55 @@ class GpgTab(QWidget):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _show_pubkey_dialog(self, pubkey_bytes: bytes, slot: GpgKeySlot) -> None:
-        name, badge = _SLOT_META.get(slot, (str(slot), "??"))
-        # Try to decode as SubjectPublicKeyInfo (DER)
+    def _decode_public_key_display(
+        self,
+        pubkey_bytes: bytes,
+        slot: GpgKeySlot,
+        algorithm: Optional[str] = None,
+    ) -> str:
         try:
             from cryptography.hazmat.primitives.serialization import (
-                Encoding, PublicFormat, load_der_public_key
+                Encoding,
+                PublicFormat,
+                load_der_public_key,
             )
-            from cryptography.hazmat.backends import default_backend
-            pub = load_der_public_key(pubkey_bytes, backend=default_backend())
-            display = pub.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+            from cryptography.hazmat.primitives.asymmetric import ec, ed25519, x25519
+
+            try:
+                pub = load_der_public_key(pubkey_bytes)
+            except Exception:
+                algo = (algorithm or self._slot_infos.get(slot, GpgKeyInfo(slot, False, None, None, None)).algo or "").lower()
+                if not algo:
+                    if len(pubkey_bytes) == 32:
+                        algo = "cv25519" if slot == GpgKeySlot.DECRYPT else "ed25519"
+                    elif len(pubkey_bytes) == 65 and pubkey_bytes[0] == 0x04:
+                        algo = "nist p-256"
+                if algo == "ed25519":
+                    pub = ed25519.Ed25519PublicKey.from_public_bytes(pubkey_bytes)
+                elif algo == "cv25519":
+                    pub = x25519.X25519PublicKey.from_public_bytes(pubkey_bytes)
+                elif algo in {"nist p-256", "nistp256", "ecdh p-256"}:
+                    pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pubkey_bytes)
+                else:
+                    raise ValueError(f"Unsupported public key algorithm: {algorithm or 'unknown'}")
+            return pub.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
         except Exception:
-            # Fallback: hex dump of the raw response
-            display = pubkey_bytes.hex()
+            return pubkey_bytes.hex()
+
+    def _show_pubkey_dialog(
+        self,
+        pubkey_bytes: bytes,
+        slot: GpgKeySlot,
+        algorithm: Optional[str] = None,
+    ) -> None:
+        name, badge = _SLOT_META.get(slot, (str(slot), "??"))
+        display = self._decode_public_key_display(pubkey_bytes, slot, algorithm)
 
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Public Key — {name} ({badge})")
         dlg.setMinimumWidth(520)
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel(f"Key generated in {name} slot. Raw public key response:"))
+        layout.addWidget(QLabel(f"Public key in {name} slot:"))
         text = QTextEdit()
         text.setReadOnly(True)
         text.setPlainText(display)

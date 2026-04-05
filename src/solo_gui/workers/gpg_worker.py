@@ -221,7 +221,7 @@ def _algo_name_from_attrs(attrs: List[int]) -> Optional[str]:
     if algo_id == _ALGO_ID_EDDSA:
         return "Ed25519"
     if algo_id == _ALGO_ID_ECDH:
-        if len(attrs) >= 11 and attrs[2:10] == [0x2B, 0x06, 0x01, 0x04, 0x01, 0x97, 0x55, 0x01]:
+        if len(attrs) >= 11 and attrs[1:9] == [0x2B, 0x06, 0x01, 0x04, 0x01, 0x97, 0x55, 0x01]:
             return "Cv25519"
         return "ECDH P-256"
     if algo_id == _ALGO_ID_ECDSA:
@@ -292,6 +292,7 @@ class GpgWorker(QObject):
     gpg_probed = Signal(bool)                       # PCSC available + AID selectable
     status_loaded = Signal(list, dict)              # list[GpgKeyInfo], pw_status dict
     key_generated = Signal(bool, str, bytes, object)  # success, error, pubkey_bytes, slot
+    public_key_exported = Signal(bool, str, bytes, object, object)  # success, error, raw pubkey bytes, slot, algo
     keys_imported = Signal(bool, str, object)       # success, error, list[GpgKeySlot]
     pin_changed = Signal(bool, str)                 # success, message
     reset_completed = Signal(bool, str)             # success, message
@@ -343,7 +344,12 @@ class GpgWorker(QObject):
     # ------------------------------------------------------------------
 
     def _connect(self) -> bool:
-        """Open PCSC connection to the first CCID reader that has a card."""
+        """Open PCSC connection to a usable CCID reader.
+
+        Solo 2 exposes an ICCD reader. On some systems pyscard auto-detect picks
+        a protocol that later breaks APDU exchange or immediately fails to
+        connect. Prefer T=1 first, then fall back to auto.
+        """
         if not PCSC_AVAILABLE:
             self.error_occurred.emit(self._pcsc_unavailable_message())
             return False
@@ -352,15 +358,31 @@ class GpgWorker(QObject):
             if not available_readers:
                 self.error_occurred.emit(self._no_reader_message())
                 return False
+            try:
+                from smartcard.CardConnection import CardConnection as _CC
+                protocols = [_CC.T1_protocol, None]
+            except Exception:
+                protocols = [None]
+
             for reader in available_readers:
-                try:
-                    conn = reader.createConnection()
-                    conn.connect()
-                    self._connection = conn
-                    self._reader = reader
-                    return True
-                except Exception:
-                    continue
+                for protocol in protocols:
+                    conn = None
+                    try:
+                        conn = reader.createConnection()
+                        if protocol is not None:
+                            conn.connect(protocol)
+                        else:
+                            conn.connect()
+                        self._connection = conn
+                        self._reader = reader
+                        return True
+                    except Exception:
+                        if conn is not None:
+                            try:
+                                conn.disconnect()
+                            except Exception:
+                                pass
+                        continue
             return False
         except Exception:
             return False
@@ -401,10 +423,15 @@ class GpgWorker(QObject):
     def _select_gpg_aid(self) -> bool:
         """SELECT the OpenPGP AID. Returns True on success (SW=9000)."""
         try:
-            _, sw1, sw2 = self._send_apdu(
-                0x00, INS_SELECT, 0x04, 0x00, GPG_AID, 0
+            select_variants = (
+                [0x00, INS_SELECT, 0x04, 0x00, len(GPG_AID)] + GPG_AID + [0x00],
+                [0x00, INS_SELECT, 0x04, 0x00, len(GPG_AID)] + GPG_AID,
             )
-            return sw1 == 0x90 and sw2 == 0x00
+            for apdu in select_variants:
+                _, sw1, sw2 = self._connection.transmit(apdu)
+                if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61:
+                    return True
+            return False
         except Exception:
             return False
 
@@ -716,6 +743,57 @@ class GpgWorker(QObject):
         except Exception as exc:
             self.keys_imported.emit(False, str(exc), [])
 
+    def export_public_key(self, slot: GpgKeySlot) -> None:
+        """Read the current public key for the given slot from the card."""
+        if not PCSC_AVAILABLE:
+            self.public_key_exported.emit(False, "PCSC not available", b"", slot, None)
+            return
+        try:
+            if not self._connect():
+                self.public_key_exported.emit(False, "Cannot connect to card reader", b"", slot, None)
+                return
+            if not self._select_gpg_aid():
+                self._disconnect()
+                self.public_key_exported.emit(False, "OpenPGP applet not found", b"", slot, None)
+                return
+
+            algo = None
+            for info in self._read_key_infos():
+                if info.slot == slot:
+                    algo = info.algo
+                    break
+
+            crt = _SLOT_CRT[slot]
+            resp, sw1, sw2 = self._send_apdu(
+                0x00, INS_GENERATE_ASYM_KEY, 0x81, 0x00, crt, 0
+            )
+            self._disconnect()
+            if not (sw1 == 0x90 and sw2 == 0x00):
+                self.public_key_exported.emit(
+                    False,
+                    f"Public key export failed: {self._sw_to_str(sw1, sw2)}",
+                    b"",
+                    slot,
+                    algo,
+                )
+                return
+
+            pubkey_raw = self._parse_pubkey_from_response(resp)
+            if pubkey_raw is None:
+                self.public_key_exported.emit(
+                    False,
+                    "Public key export failed: could not parse card response",
+                    b"",
+                    slot,
+                    algo,
+                )
+                return
+
+            self.public_key_exported.emit(True, "", pubkey_raw, slot, algo)
+        except Exception as exc:
+            self._disconnect()
+            self.public_key_exported.emit(False, str(exc), b"", slot, None)
+
     def generate_key(self, slot: GpgKeySlot, algo_name: str, admin_pin: str) -> None:
         """Generate a key in the given slot.
 
@@ -789,12 +867,11 @@ class GpgWorker(QObject):
                 )
                 return
 
-            pubkey_bytes = bytes(resp)
-
             # Write creation timestamp and fingerprint so the key is GPG-compatible.
             # These are not set by the card itself during key generation.
             ts = int(time.time())
             pubkey_raw = self._parse_pubkey_from_response(resp)
+            pubkey_bytes = pubkey_raw if pubkey_raw is not None else bytes(resp)
             if pubkey_raw is not None:
                 fp = _compute_v4_fingerprint(ts, fp_algo, pubkey_raw)
                 if fp is not None:
