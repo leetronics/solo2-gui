@@ -399,6 +399,21 @@ class PivWorker(QObject):
             return None  # Data not found
         return None
 
+    def _slot_has_key(self, slot: PivSlot) -> bool:
+        """Return True when GET METADATA reports a private key in the slot."""
+        if not self._connection:
+            return False
+
+        key_ref = KEY_REFERENCE.get(slot)
+        if not key_ref:
+            return False
+
+        try:
+            _response, sw1, sw2 = self._connection.transmit([0x00, 0xF7, 0x00, key_ref, 0x00])
+            return sw1 == 0x90 or sw1 == 0x61
+        except Exception:
+            return False
+
     def _parse_certificate(self, data: bytes, slot: PivSlot) -> Optional[PivCertificate]:
         """Parse a PIV certificate from raw data."""
         try:
@@ -635,7 +650,8 @@ class PivWorker(QObject):
                         cert = self._parse_certificate(raw, slot)
 
                 cached = self._key_cache.get(slot)
-                has_key = cert is not None or cached is not None
+                metadata_key = self._slot_has_key(slot)
+                has_key = bool(metadata_key or cert is not None or cached is not None)
 
                 key_type_str = None
                 if cached:
@@ -720,14 +736,6 @@ class PivWorker(QObject):
                     'algorithm': _KEY_TYPE_LABELS.get(key_type, key_type.value if key_type else "Unknown"),
                     'has_certificate': False,
                 }
-                # Auto-store placeholder cert while management key is still authenticated
-                if pubkey_der:
-                    cert_der = self._create_soft_signed_cert(pubkey_der, key_type)
-                    if cert_der and self._put_certificate_raw(slot, cert_der):
-                        self._key_cache[slot]['has_certificate'] = True
-                        print(f"[PIV] Placeholder cert stored in slot {slot.name}")
-                    elif cert_der:
-                        print(f"[PIV] WARNING: PUT DATA returned failure for slot {slot.name}")
                 self.key_generated.emit(True, "", pubkey_der, slot)
             elif sw1 == 0x61:
                 # More data available - need to call GET RESPONSE
@@ -742,14 +750,6 @@ class PivWorker(QObject):
                         'algorithm': _KEY_TYPE_LABELS.get(key_type, key_type.value if key_type else "Unknown"),
                         'has_certificate': False,
                     }
-                    # Auto-store placeholder cert while management key is still authenticated
-                    if pubkey_der:
-                        cert_der = self._create_soft_signed_cert(pubkey_der, key_type)
-                        if cert_der and self._put_certificate_raw(slot, cert_der):
-                            self._key_cache[slot]['has_certificate'] = True
-                            print(f"[PIV] Placeholder cert stored in slot {slot.name}")
-                        elif cert_der:
-                            print(f"[PIV] WARNING: PUT DATA returned failure for slot {slot.name}")
                     self.key_generated.emit(True, "", pubkey_der, slot)
                 else:
                     self.key_generated.emit(False, f"Failed to retrieve public key: SW={sw1_2:02X}{sw2_2:02X}", b"", None)
@@ -1003,66 +1003,6 @@ class PivWorker(QObject):
             return [0x81, length]
         else:
             return [0x82, (length >> 8) & 0xFF, length & 0xFF]
-
-    def _create_soft_signed_cert(self, pubkey_der: bytes, key_type: PivKeyType) -> Optional[bytes]:
-        """Create a self-signed placeholder certificate for a PIV slot public key.
-
-        Uses a throwaway signing key so the cert can be written to the card without
-        needing access to the PIV slot private key. The stored cert survives reconnects,
-        allowing load_slots() to detect that a key exists.
-        """
-        try:
-            from cryptography import x509
-            from cryptography.hazmat.primitives import hashes, serialization
-            from cryptography.hazmat.primitives.asymmetric import ec
-            from cryptography.x509.oid import NameOID
-            import datetime
-
-            print(f"[PIV] Creating placeholder cert for {key_type.value}, pubkey={len(pubkey_der)}B")
-            pub = serialization.load_der_public_key(pubkey_der)
-            subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "SoloKeys PIV Key")])
-            now = datetime.datetime.now(datetime.timezone.utc)
-            if isinstance(pub, ec.EllipticCurvePublicKey):
-                sign_key = ec.generate_private_key(pub.curve)
-            else:
-                from cryptography.hazmat.primitives.asymmetric import rsa
-                sign_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            cert = (
-                x509.CertificateBuilder()
-                .subject_name(subject)
-                .issuer_name(subject)
-                .public_key(pub)
-                .serial_number(x509.random_serial_number())
-                .not_valid_before(now)
-                .not_valid_after(now + datetime.timedelta(days=3650))
-                .sign(sign_key, hashes.SHA256())
-            )
-            result = cert.public_bytes(serialization.Encoding.DER)
-            print(f"[PIV] Placeholder cert created: {len(result)}B DER")
-            return result
-        except Exception as e:
-            import traceback
-            print(f"[PIV] Failed to create placeholder cert: {e}")
-            traceback.print_exc()
-            return None
-
-    def _put_certificate_raw(self, slot: PivSlot, cert_der: bytes) -> bool:
-        """Write raw DER certificate bytes to a PIV slot via PUT DATA.
-
-        Assumes management key authentication has already been performed.
-        """
-        tag = TAG_CERTIFICATE.get(slot)
-        if not tag:
-            return False
-        data = list(cert_der)
-        cert_tlv = [0x70] + self._encode_length(len(data)) + data
-        cert_tlv += [0x71, 0x01, 0x00, 0xFE, 0x00]
-        data_obj = [0x53] + self._encode_length(len(cert_tlv)) + cert_tlv
-        full_data = [0x5C, len(tag)] + tag + data_obj
-        print(f"[PIV] PUT DATA: slot={slot.name}, cert={len(cert_der)}B, payload={len(full_data)}B")
-        _, sw1, sw2 = self._send_apdu(INS_PUT_DATA, 0x3F, 0xFF, full_data)
-        print(f"[PIV] PUT DATA result: SW={sw1:02X}{sw2:02X}")
-        return sw1 == 0x90 and sw2 == 0x00
 
     def get_pin_status(self) -> None:
         """Get current PIN status and retry counters."""

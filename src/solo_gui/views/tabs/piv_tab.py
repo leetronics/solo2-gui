@@ -287,12 +287,10 @@ class GenerateKeyDialog(QDialog):
         layout.addLayout(form_layout)
 
         workflow_note = QLabel(
-            "<b>Typical workflow:</b> Generate key → copy the public key shown after "
-            "generation → create a CSR → get it signed by your CA → "
-            "use <i>Import Cert</i> to store the signed certificate.<br>"
-            "A self-signed placeholder certificate is stored automatically so the slot "
-            "remains visible on reconnect, but real PIV use (SSH, smart card login, "
-            "S/MIME) requires a proper CA-signed certificate."
+            "<b>Typical workflow:</b> Generate the private key on the device → "
+            "use the public key shown after generation to create a CSR or request a certificate → "
+            "use <i>Import Cert</i> to store the issued certificate.<br>"
+            "The slot is only fully ready for normal PIV use once a matching certificate has been imported."
         )
         workflow_note.setWordWrap(True)
         workflow_note.setStyleSheet(
@@ -302,7 +300,7 @@ class GenerateKeyDialog(QDialog):
         layout.addWidget(workflow_note)
 
         layout.addWidget(
-            QLabel("Warning: This will overwrite any existing key in the slot.")
+            QLabel("Warning: This will overwrite any existing key and certificate in the slot.")
         )
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -382,7 +380,7 @@ class SlotCard(QFrame):
         self._btn_export.setVisible(False)
 
         self._btn_delete = QPushButton("✕")
-        self._btn_delete.setToolTip("Delete key and certificate")
+        self._btn_delete.setToolTip("Delete certificate")
         self._btn_delete.setStyleSheet(
             "QPushButton { color: #cc0000; border: 1px solid #cc0000; "
             "border-radius: 3px; padding: 2px 6px; } "
@@ -409,8 +407,19 @@ class SlotCard(QFrame):
         row2.addWidget(self._status_label)
         row2.addStretch()
 
+        row3 = QHBoxLayout()
+        row3.setSpacing(6)
+        row3.addSpacing(42)
+
+        self._hint_label = QLabel("Generate a new device-resident key in this slot.")
+        self._hint_label.setWordWrap(True)
+        self._hint_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 9pt;")
+        row3.addWidget(self._hint_label)
+        row3.addStretch()
+
         outer.addLayout(row1)
         outer.addLayout(row2)
+        outer.addLayout(row3)
         self._apply_action_styles()
 
     def _button_style(self, primary: bool) -> str:
@@ -461,17 +470,29 @@ class SlotCard(QFrame):
         self._has_cert = has_cert
         key_type = slot_info.key_type_str
 
+        self._btn_generate.setText("Regenerate Key" if has_key else "Generate Key")
+        self._btn_import.setText("Replace Cert" if has_cert else "Import Cert")
+        self._btn_import.setEnabled(has_key)
+        self._btn_import.setToolTip(
+            "Import or replace the X.509 certificate for this slot"
+            if has_key
+            else "Generate or recover the private key first, then import the matching certificate"
+        )
         self._btn_export.setVisible(has_cert)
-        self._btn_delete.setVisible(has_key or has_cert)
+        self._btn_delete.setVisible(has_cert)
         self._apply_action_styles()
 
         if not has_key and not has_cert:
             self._status_label.setText("No key")
             self._status_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 10pt;")
+            self._hint_label.setText("Generate a new device-resident key in this slot.")
+            self._hint_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 9pt;")
         elif has_key and not has_cert:
-            kt = key_type or "Unknown key"
-            self._status_label.setText(f"{kt} — no certificate")
+            kt = key_type or "Key"
+            self._status_label.setText(f"{kt} present — certificate missing")
             self._status_label.setStyleSheet("color: #b26a00; font-size: 10pt;")
+            self._hint_label.setText("Next step: import the issued certificate for this key.")
+            self._hint_label.setStyleSheet("color: #b26a00; font-size: 9pt;")
         else:
             cert = slot_info.certificate
             subject_short = self._short_subject(cert.subject) if cert else ""
@@ -487,12 +508,14 @@ class SlotCard(QFrame):
                 text += f"  (expires {expiry})"
             self._status_label.setText(text)
             self._status_label.setStyleSheet(f"color: {colors['text']}; font-size: 10pt;")
+            self._hint_label.setText("Ready for PIV use.")
+            self._hint_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 9pt;")
 
     def set_controls_enabled(self, enabled: bool) -> None:
         self._btn_generate.setEnabled(enabled)
-        self._btn_import.setEnabled(enabled)
-        self._btn_export.setEnabled(enabled)
-        self._btn_delete.setEnabled(enabled)
+        self._btn_import.setEnabled(enabled and self._has_key)
+        self._btn_export.setEnabled(enabled and self._has_cert)
+        self._btn_delete.setEnabled(enabled and self._has_cert)
         self._apply_action_styles()
 
     def _short_subject(self, subject: str) -> str:
@@ -523,6 +546,9 @@ class PivTab(QWidget):
         self._worker: Optional[PivWorker] = None
         self._worker_thread: Optional[QThread] = None
         self._slot_cards: Dict[PivSlot, SlotCard] = {}
+        self._slot_infos: Dict[PivSlot, SlotInfo] = {
+            slot: SlotInfo(slot, False, None, None) for slot in PivSlot
+        }
         self._last_generated_key_type: Optional[PivKeyType] = None
         self._controls_available = False
         self._reset_ready = False
@@ -717,6 +743,7 @@ class PivTab(QWidget):
         """Clear the current device and reset all slot cards."""
         self._device = None
         self._cleanup_worker()
+        self._slot_infos = {slot: SlotInfo(slot, False, None, None) for slot in PivSlot}
         for slot, card in self._slot_cards.items():
             card.update_slot(SlotInfo(slot, False, None, None))
         self._pin_status_label.setText("Unknown")
@@ -820,6 +847,7 @@ class PivTab(QWidget):
     def _on_slots_loaded(self, slot_infos: list) -> None:
         self._set_busy(False)
         for info in slot_infos:
+            self._slot_infos[info.slot] = info
             card = self._slot_cards.get(info.slot)
             if card:
                 card.update_slot(info)
@@ -831,18 +859,24 @@ class PivTab(QWidget):
                 card = self._slot_cards.get(slot)
                 if card:
                     key_type_str = _KEY_TYPE_LABELS.get(self._last_generated_key_type)
-                    card.update_slot(SlotInfo(slot, True, key_type_str, None))
+                    slot_info = SlotInfo(slot, True, key_type_str, None)
+                    self._slot_infos[slot] = slot_info
+                    card.update_slot(slot_info)
             if pubkey_der:
                 self._show_pubkey_dialog(pubkey_der)
             else:
-                QMessageBox.information(self, "Success", "Key generated successfully")
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    "Key generated successfully.\n\nNext step: import the matching certificate for this slot.",
+                )
         else:
             QMessageBox.critical(self, "Error", f"Failed to generate key: {error}")
 
     def _on_key_deleted(self, success: bool, error: str) -> None:
         self._set_busy(False)
         if success:
-            QMessageBox.information(self, "Success", "Slot cleared successfully")
+            QMessageBox.information(self, "Success", "Certificate deleted successfully")
             self._reload_slots()
         else:
             QMessageBox.critical(self, "Error", f"Failed to delete: {error}")
@@ -850,7 +884,7 @@ class PivTab(QWidget):
     def _on_certificate_imported(self, success: bool, error: str) -> None:
         self._set_busy(False)
         if success:
-            QMessageBox.information(self, "Success", "Certificate imported successfully")
+            QMessageBox.information(self, "Success", "Certificate imported successfully.\n\nThis slot is ready for PIV use.")
             self._reload_slots()
         else:
             QMessageBox.critical(self, "Error", f"Failed to import certificate: {error}")
@@ -993,6 +1027,15 @@ class PivTab(QWidget):
     def _import_certificate_for(self, slot: PivSlot) -> None:
         if not self._worker:
             return
+        slot_info = self._slot_infos.get(slot)
+        if slot_info is None or not slot_info.has_key:
+            QMessageBox.information(
+                self,
+                "Generate Key First",
+                "This slot does not currently expose a private key.\n\n"
+                "Generate or recover the key first, then import the matching certificate.",
+            )
+            return
 
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1027,6 +1070,11 @@ class PivTab(QWidget):
             cred_dialog = QDialog(self)
             cred_dialog.setWindowTitle(f"Import Certificate — {name} ({hex_id})")
             cred_layout = QVBoxLayout(cred_dialog)
+            info_label = QLabel(
+                "Import the issued X.509 certificate that matches the private key already stored in this slot."
+            )
+            info_label.setWordWrap(True)
+            cred_layout.addWidget(info_label)
             form = QFormLayout()
 
             pin_input = QLineEdit()
@@ -1066,9 +1114,9 @@ class PivTab(QWidget):
         name, hex_id = _SLOT_META.get(slot, (str(slot), "??"))
         reply = QMessageBox.question(
             self,
-            "Confirm Delete",
-            f"Delete the key and certificate in {name} ({hex_id})?\n\n"
-            "This action cannot be undone.",
+            "Confirm Certificate Delete",
+            f"Delete the certificate in {name} ({hex_id})?\n\n"
+            "The private key stays on the device.",
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
@@ -1164,7 +1212,13 @@ class PivTab(QWidget):
         dlg.setWindowTitle("Public Key")
         dlg.setMinimumWidth(500)
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("Key generated successfully. Public key:"))
+        info = QLabel(
+            "Key generated successfully.\n\n"
+            "This slot now contains a private key, but it does not have a certificate yet. "
+            "Use this public key to create or request the matching certificate, then return to this slot and choose Import Cert."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
         text = QTextEdit()
         text.setReadOnly(True)
         text.setPlainText(pem_text)
