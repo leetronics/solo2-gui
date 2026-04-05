@@ -58,8 +58,8 @@ class OverviewTab(QWidget):
         firmware_layout.addWidget(self._download_update_button)
 
         # Flash from File
-        flash_group = QGroupBox("Flash Firmware from File")
-        flash_layout = QVBoxLayout(flash_group)
+        self._flash_group = QGroupBox("Flash Firmware from File")
+        flash_layout = QVBoxLayout(self._flash_group)
         file_row = QHBoxLayout()
         self._flash_file_input = QLineEdit()
         self._flash_file_input.setPlaceholderText("Path to firmware file (.bin or .sb2)…")
@@ -85,12 +85,13 @@ class OverviewTab(QWidget):
 
         layout.addWidget(info_group)
         layout.addWidget(firmware_group)
-        layout.addWidget(flash_group)
+        layout.addWidget(self._flash_group)
         layout.addLayout(status_layout)
         layout.addStretch()
 
         self._check_updates_button.setEnabled(False)
         self._flash_file_btn.setEnabled(False)
+        self._flash_group.setVisible(False)
 
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
@@ -98,7 +99,7 @@ class OverviewTab(QWidget):
         self._setup_firmware_worker()
         self._update_device_info()
         self._check_updates_button.setEnabled(True)
-        self._flash_file_btn.setEnabled(True)
+        self._update_flash_file_visibility()
 
     def clear_device(self) -> None:
         self._device = None
@@ -107,6 +108,7 @@ class OverviewTab(QWidget):
         self._clear_device_info()
         self._check_updates_button.setEnabled(False)
         self._flash_file_btn.setEnabled(False)
+        self._flash_group.setVisible(False)
 
     def _setup_firmware_worker(self) -> None:
         self._cleanup_firmware_worker()
@@ -136,12 +138,23 @@ class OverviewTab(QWidget):
         info = self._device.get_info()
         self._device_type_label.setText(info.serial_number or "SoloKeys Solo 2")
         self._firmware_label.setText(format_firmware_full(info.firmware_version))
+        self._update_flash_file_visibility()
+
+    def _update_flash_file_visibility(self) -> None:
+        variant = getattr(self._device, "variant", "") if self._device else ""
+        show_flash_from_file = variant == "Hacker"
+        self._flash_group.setVisible(show_flash_from_file)
+        self._flash_file_btn.setEnabled(show_flash_from_file and self._device is not None)
+        if not show_flash_from_file:
+            self._flash_file_input.clear()
 
     def _clear_device_info(self) -> None:
         self._device_type_label.setText("Not connected")
         self._firmware_label.setText("-")
         self._update_info_label.setText("")
         self._download_update_button.setVisible(False)
+        self._flash_group.setVisible(False)
+        self._flash_file_input.clear()
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self._status_progress.setVisible(busy)

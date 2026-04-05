@@ -175,6 +175,13 @@ class FirmwareUpdateWorker(QObject):
                     "A raw .bin file will not boot on this device."
                 )
                 return False
+            if self._variant == "" and not is_sb2:
+                self.error_occurred.emit(
+                    "Device variant could not be determined reliably.\n"
+                    "Refusing to flash a raw .bin because this may be a Secure device.\n"
+                    "Reconnect the token and try again, or use a signed SB2.1 firmware file."
+                )
+                return False
 
             return True
 
@@ -260,8 +267,24 @@ class FirmwareUpdateWorker(QObject):
                 )
                 return
             url = firmware_info.sb2_url
-        else:
+        elif self._variant == "Hacker":
             url = firmware_info.download_url or firmware_info.sb2_url
+            if not url:
+                self.update_completed.emit(False, "No firmware asset found in the latest release.")
+                return
+        else:
+            if not firmware_info.sb2_url:
+                self.update_completed.emit(
+                    False,
+                    "Device variant could not be determined reliably.\n"
+                    "Refusing automatic update because no signed SB2.1 firmware asset is available."
+                )
+                return
+            url = firmware_info.sb2_url
+            self.update_progress.emit(
+                0,
+                "Device variant is unknown; using signed SB2.1 firmware as a safe default.",
+            )
             if not url:
                 self.update_completed.emit(False, "No firmware asset found in the latest release.")
                 return

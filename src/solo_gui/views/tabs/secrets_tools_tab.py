@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from solo_gui.models.device import SoloDevice
+from solo_gui.models.device import SoloDevice, firmware_supports_extended_applets
 from solo_gui.workers.totp_worker import (
     HMAC_SLOT_NAMES,
     HMAC_SLOT_NUMBERS,
@@ -176,6 +176,13 @@ class HmacTab(QWidget):
             self._hmac_slots = self._blank_slots()
             self._refresh_hmac_controls()
             self._status.setText("HMAC unavailable in bootloader mode")
+            return
+        info = device.get_info()
+        if not firmware_supports_extended_applets(info.firmware_version):
+            self._worker = None
+            self._hmac_slots = self._blank_slots()
+            self._refresh_hmac_controls()
+            self._status.setText("HMAC unavailable on this firmware")
             return
         self._worker = TotpWorker(device)
         self._worker.hmac_slots_loaded.connect(self._on_hmac_slots_loaded)
