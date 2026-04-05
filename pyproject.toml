@@ -3,7 +3,7 @@ name = "solokeys-gui"
 version = "0.1.0"
 description = "Platform-independent GUI for managing SoloKeys Solo 2 FIDO2 tokens"
 authors = ["Manuel Domke <manuel@leetronics.de>"]
-license = "GPL-3.0-only"
+license = "MIT OR Apache-2.0"
 readme = "README.md"
 packages = [
     {include = "solo_gui", from = "src"},
