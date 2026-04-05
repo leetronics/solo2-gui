@@ -62,7 +62,7 @@ class OverviewTab(QWidget):
         flash_layout = QVBoxLayout(flash_group)
         file_row = QHBoxLayout()
         self._flash_file_input = QLineEdit()
-        self._flash_file_input.setPlaceholderText("Path to firmware .bin file…")
+        self._flash_file_input.setPlaceholderText("Path to firmware file (.bin or .sb2)…")
         file_row.addWidget(self._flash_file_input)
         browse_btn = QPushButton("Browse…")
         browse_btn.clicked.connect(self._browse_firmware_file)
@@ -113,7 +113,8 @@ class OverviewTab(QWidget):
         if not self._device:
             return
         self._firmware_thread = QThread()
-        self._firmware_worker = FirmwareUpdateWorker(self._device)
+        variant = getattr(self._device, "variant", "")
+        self._firmware_worker = FirmwareUpdateWorker(self._device, variant=variant)
         self._firmware_worker.moveToThread(self._firmware_thread)
         self._firmware_worker.update_progress.connect(self._on_firmware_progress)
         self._firmware_worker.firmware_info_found.connect(self._on_firmware_info)
@@ -172,7 +173,7 @@ class OverviewTab(QWidget):
 
     def _browse_firmware_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Firmware File", "", "Firmware (*.bin);;All Files (*)"
+            self, "Select Firmware File", "", "Firmware (*.bin *.sb2);;All Files (*)"
         )
         if path:
             self._flash_file_input.setText(path)

@@ -22,6 +22,11 @@ from solo2.admin import AdminSession, RebootMode
 from solo2.bootloader import BootloaderSession, BootloaderError
 
 
+def _is_sb2_file(data: bytes) -> bool:
+    """Detect SB2.1 by the 'sgtl' magic at bytes 28-32."""
+    return len(data) >= 96 and data[28:32] == b"sgtl"
+
+
 @dataclass
 class FirmwareInfo:
     """Firmware version information."""
@@ -31,7 +36,8 @@ class FirmwareInfo:
     size: int
     checksum: str
     release_notes: str
-    download_url: str = ""
+    download_url: str = ""   # .bin URL (Hacker)
+    sb2_url: str = ""        # .sb2 URL (Secure)
 
 
 class FirmwareUpdateWorker(QObject):
@@ -44,9 +50,10 @@ class FirmwareUpdateWorker(QObject):
     firmware_info_found = Signal(object)  # FirmwareInfo or None
     bootloader_mode_changed = Signal(bool)  # True if in bootloader mode
 
-    def __init__(self, device):
+    def __init__(self, device, variant: str = ""):
         super().__init__()
         self._device = device
+        self._variant = variant  # "Hacker", "Secure", or ""
 
     def _open_hid_device(self):
         """Open HID device connection."""
@@ -161,6 +168,14 @@ class FirmwareUpdateWorker(QObject):
                 self.error_occurred.emit("Firmware file too large")
                 return False
 
+            is_sb2 = _is_sb2_file(firmware_data)
+            if self._variant == "Secure" and not is_sb2:
+                self.error_occurred.emit(
+                    "This is a Secure device — only signed SB2.1 firmware (.sb2) can be flashed.\n"
+                    "A raw .bin file will not boot on this device."
+                )
+                return False
+
             return True
 
         except Exception as e:
@@ -236,8 +251,23 @@ class FirmwareUpdateWorker(QObject):
 
     def perform_update(self, firmware_info: FirmwareInfo) -> None:
         """Perform complete firmware update process."""
+        if self._variant == "Secure":
+            if not firmware_info.sb2_url:
+                self.update_completed.emit(
+                    False,
+                    "No signed SB2.1 firmware found in the latest release.\n"
+                    "Cannot update a Secure device with an unsigned binary."
+                )
+                return
+            url = firmware_info.sb2_url
+        else:
+            url = firmware_info.download_url or firmware_info.sb2_url
+            if not url:
+                self.update_completed.emit(False, "No firmware asset found in the latest release.")
+                return
+
         self._run_flash_flow(
-            firmware_loader=lambda: self.download_firmware(firmware_info.download_url),
+            firmware_loader=lambda: self.download_firmware(url),
             expected_hash=firmware_info.checksum,
             success_message="Firmware updated successfully!",
             completion_label="Update complete!",
@@ -246,7 +276,7 @@ class FirmwareUpdateWorker(QObject):
     # ------------------------------------------------------------------ flash_from_file
 
     def _flash_firmware_bytes(self, firmware_data: bytes) -> None:
-        """Flash raw firmware bytes via the MCU bootloader HID protocol."""
+        """Flash firmware bytes via the MCU bootloader HID protocol."""
         self.update_progress.emit(50, "Rebooting device to bootloader…")
         try:
             AdminSession(self._device).reboot(RebootMode.BOOTLOADER)
@@ -256,6 +286,8 @@ class FirmwareUpdateWorker(QObject):
         self.update_progress.emit(55, "Waiting for bootloader…")
         time.sleep(1.0)
 
+        use_sb2 = _is_sb2_file(firmware_data)
+
         def _progress(written: int, total_bytes: int) -> None:
             pct = 65 + int(written / total_bytes * 25)
             self.update_progress.emit(
@@ -263,8 +295,12 @@ class FirmwareUpdateWorker(QObject):
             )
 
         with BootloaderSession.find(timeout=15) as bl:
-            self.update_progress.emit(60, "Erasing flash…")
-            bl.write_flash(firmware_data, progress_cb=_progress)
+            if use_sb2:
+                self.update_progress.emit(60, "Sending SB2.1 signed firmware…")
+                bl.receive_sb_file(firmware_data, progress_cb=_progress)
+            else:
+                self.update_progress.emit(60, "Erasing flash…")
+                bl.write_flash(firmware_data, progress_cb=_progress)
             self.update_progress.emit(92, "Rebooting device…")
             bl.reset()
 
@@ -338,29 +374,28 @@ class FirmwareRepo:
             published_at = data.get("published_at", "")[:10]
             body = data.get("body", "")
 
-            # Find firmware binary asset
+            # Find firmware binary assets (.bin for Hacker, .sb2 for Secure)
             assets = data.get("assets", [])
-            firmware_asset = None
+            bin_asset = None
+            sb2_asset = None
 
             for asset in assets:
                 name = asset.get("name", "").lower()
-                # Look for firmware binary (various naming conventions)
-                if any(
-                    pattern in name
-                    for pattern in [".bin", "firmware", "solo2"]
-                    if not name.endswith(".sig")
-                ):
-                    firmware_asset = asset
-                    break
+                if name.endswith(".sig"):
+                    continue
+                if name.endswith(".sb2") and sb2_asset is None:
+                    sb2_asset = asset
+                elif name.endswith(".bin") and bin_asset is None:
+                    bin_asset = asset
 
-            if not firmware_asset:
+            primary = sb2_asset or bin_asset
+            if not primary:
                 return None
 
             # Try to extract checksum from release notes
             checksum = ""
             for line in body.split("\n"):
                 if "sha256" in line.lower() or "checksum" in line.lower():
-                    # Try to extract hash (64 hex chars)
                     import re
 
                     match = re.search(r"[a-fA-F0-9]{64}", line)
@@ -371,10 +406,11 @@ class FirmwareRepo:
             return FirmwareInfo(
                 version=version,
                 build_date=published_at,
-                size=firmware_asset.get("size", 0),
+                size=primary.get("size", 0),
                 checksum=checksum,
                 release_notes=body,
-                download_url=firmware_asset.get("browser_download_url", ""),
+                download_url=bin_asset.get("browser_download_url", "") if bin_asset else "",
+                sb2_url=sb2_asset.get("browser_download_url", "") if sb2_asset else "",
             )
 
         except requests.exceptions.RequestException:
