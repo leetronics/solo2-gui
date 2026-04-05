@@ -35,6 +35,10 @@ from solo_gui.workers.gpg_worker import (
     GpgKeyInfo,
     GpgKeySlot,
     PCSC_AVAILABLE,
+    normalize_openpgp_algorithm_label,
+    openpgp_candidate_matches_slot,
+    supported_openpgp_algorithm_labels,
+    supported_openpgp_algorithms,
 )
 
 
@@ -215,12 +219,8 @@ class GenerateGpgKeyDialog(QDialog):
         form.addRow("Slot:", slot_label)
 
         self._algo_combo = QComboBox()
-        if slot == GpgKeySlot.DECRYPT:
-            self._algo_combo.addItem("Cv25519 / X25519 (Recommended)", "Cv25519")
-            self._algo_combo.addItem("NIST P-256", "P-256")
-        else:
-            self._algo_combo.addItem("Ed25519 (Recommended)", "Ed25519")
-            self._algo_combo.addItem("NIST P-256", "P-256")
+        for label, value in supported_openpgp_algorithms(slot):
+            self._algo_combo.addItem(label, value)
         form.addRow("Algorithm:", self._algo_combo)
 
         self._admin_pin_input = QLineEdit()
@@ -868,14 +868,21 @@ class GpgTab(QWidget):
         )
         self._update_reset_visibility(user_retries, admin_retries)
 
-    def _on_key_generated(self, success: bool, error: str, pubkey_bytes: bytes, slot) -> None:
+    def _on_key_generated(
+        self,
+        success: bool,
+        error: str,
+        pubkey_bytes: bytes,
+        slot,
+        algorithm,
+    ) -> None:
         self._set_busy(False)
         if success:
             self._last_pubkey_bytes = pubkey_bytes
             self._last_pubkey_slot = slot
             try:
                 if pubkey_bytes:
-                    self._show_pubkey_dialog(pubkey_bytes, slot)
+                    self._show_pubkey_dialog(pubkey_bytes, slot, algorithm=algorithm)
                 else:
                     QMessageBox.information(self, "Success", "Key generated successfully")
             except Exception as exc:
@@ -971,10 +978,14 @@ class GpgTab(QWidget):
         compatible = [candidate for candidate in candidates if self._candidate_matches_slot(slot, candidate)]
         if not compatible:
             name, badge = _SLOT_META.get(slot, (str(slot), "??"))
+            supported = ", ".join(supported_openpgp_algorithm_labels(slot))
+            found = self._describe_found_import_algorithms(candidates)
             QMessageBox.warning(
                 self,
                 "No Compatible Keys",
-                f"No compatible imported secret keys were found for the {name} ({badge}) slot.",
+                f"No compatible imported secret keys were found for the {name} ({badge}) slot.\n\n"
+                f"This firmware supports: {supported}\n"
+                f"Found in export: {found}",
             )
             return
 
@@ -1039,10 +1050,19 @@ class GpgTab(QWidget):
             for slot in (GpgKeySlot.SIGN, GpgKeySlot.DECRYPT, GpgKeySlot.AUTH)
         }
         if not any(slot_options.values()):
+            slot_summaries = []
+            for current_slot in (GpgKeySlot.SIGN, GpgKeySlot.DECRYPT, GpgKeySlot.AUTH):
+                name, _badge = _SLOT_META.get(current_slot, (str(current_slot), "??"))
+                slot_summaries.append(
+                    f"{name}: {', '.join(supported_openpgp_algorithm_labels(current_slot))}"
+                )
             QMessageBox.warning(
                 self,
                 "No Compatible Keys",
-                "No compatible imported secret keys were found for the OpenPGP slots.",
+                "No compatible imported secret keys were found for the OpenPGP slots.\n\n"
+                f"Found in export: {self._describe_found_import_algorithms(candidates)}\n\n"
+                "Supported by this firmware:\n"
+                + "\n".join(slot_summaries),
             )
             return
 
@@ -1105,11 +1125,18 @@ class GpgTab(QWidget):
         finally:
             self._set_busy(False)
 
+    def _describe_found_import_algorithms(self, candidates: list[GpgImportCandidate]) -> str:
+        algorithms = sorted(
+            {
+                normalize_openpgp_algorithm_label(candidate.algorithm)
+                for candidate in candidates
+                if candidate.algorithm
+            }
+        )
+        return ", ".join(algorithms) if algorithms else "Unknown"
+
     def _candidate_matches_slot(self, slot: GpgKeySlot, candidate: GpgImportCandidate) -> bool:
-        algorithm = candidate.algorithm.lower()
-        if slot == GpgKeySlot.DECRYPT:
-            return algorithm in {"cv25519", "nist p-256", "nistp256"}
-        return algorithm in {"ed25519", "nist p-256", "nistp256"}
+        return openpgp_candidate_matches_slot(slot, candidate.algorithm)
 
     def _candidate_recommended_for_slot(self, slot: GpgKeySlot, candidate: GpgImportCandidate) -> bool:
         caps = candidate.capabilities.lower()
@@ -1223,20 +1250,39 @@ class GpgTab(QWidget):
             try:
                 pub = load_der_public_key(pubkey_bytes)
             except Exception:
-                algo = (algorithm or self._slot_infos.get(slot, GpgKeyInfo(slot, False, None, None, None)).algo or "").lower()
+                algo = (
+                    algorithm
+                    or self._slot_infos.get(slot, GpgKeyInfo(slot, False, None, None, None)).algo
+                    or ""
+                ).lower()
                 if not algo:
                     if len(pubkey_bytes) == 32:
                         algo = "cv25519" if slot == GpgKeySlot.DECRYPT else "ed25519"
-                    elif len(pubkey_bytes) == 65 and pubkey_bytes[0] == 0x04:
-                        algo = "nist p-256"
+                    elif pubkey_bytes and pubkey_bytes[0] == 0x04:
+                        algo = {
+                            65: "nist p-256",
+                            97: "nist p-384",
+                            129: "brainpool p512r1",
+                            133: "nist p-521",
+                        }.get(len(pubkey_bytes), "unknown")
+                algo = normalize_openpgp_algorithm_label(algo).lower()
                 if algo == "ed25519":
                     pub = ed25519.Ed25519PublicKey.from_public_bytes(pubkey_bytes)
-                elif algo == "cv25519":
+                elif algo in {"cv25519", "cv25519 / x25519", "x25519"}:
                     pub = x25519.X25519PublicKey.from_public_bytes(pubkey_bytes)
-                elif algo in {"nist p-256", "nistp256", "ecdh p-256"}:
-                    pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pubkey_bytes)
                 else:
-                    raise ValueError(f"Unsupported public key algorithm: {algorithm or 'unknown'}")
+                    curve = {
+                        "nist p-256": ec.SECP256R1(),
+                        "nist p-384": ec.SECP384R1(),
+                        "nist p-521": ec.SECP521R1(),
+                        "brainpool p256r1": ec.BrainpoolP256R1(),
+                        "brainpool p384r1": ec.BrainpoolP384R1(),
+                        "brainpool p512r1": ec.BrainpoolP512R1(),
+                        "secp256k1": ec.SECP256K1(),
+                    }.get(algo)
+                    if curve is None:
+                        raise ValueError(f"Unsupported public key algorithm: {algorithm or 'unknown'}")
+                    pub = ec.EllipticCurvePublicKey.from_encoded_point(curve, pubkey_bytes)
             return pub.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
         except Exception:
             return pubkey_bytes.hex()

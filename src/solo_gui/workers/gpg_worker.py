@@ -87,6 +87,18 @@ class GpgImportCandidate:
         return "  ·  ".join(parts)
 
 
+@dataclass(frozen=True)
+class OpenPgpAlgoSpec:
+    key: str
+    label: str
+    sign_attrs: Optional[Tuple[int, ...]]
+    decrypt_attrs: Optional[Tuple[int, ...]]
+    aliases: Tuple[str, ...]
+    kdf_hash_id: Optional[int] = None
+    kdf_sym_id: Optional[int] = None
+    is_25519: bool = False
+
+
 # Algorithm attribute bytes for PUT DATA (tags C1/C2/C3)
 # Format: first byte = algo ID
 _ALGO_ID_EDDSA = 0x16
@@ -94,17 +106,109 @@ _ALGO_ID_ECDH = 0x12
 _ALGO_ID_ECDSA = 0x13
 _ALGO_ID_RSA = 0x01
 
-ALGO_ATTRS = {
-    # Format: [algo_id, OID bytes...] — no length prefix, no trailing format byte.
-    # Byte sequences match opcard-rs types.rs constants exactly.
-    # Sign/Auth slots
-    "Ed25519":    [0x16, 0x2B, 0x06, 0x01, 0x04, 0x01, 0xDA, 0x47, 0x0F, 0x01],
-    # Decrypt slot (X25519 / Curve25519)
-    "Cv25519":    [0x12, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x97, 0x55, 0x01, 0x05, 0x01],
-    # NIST P-256 sign/auth (ECDSA)
-    "P-256-sign": [0x13, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07],
-    # NIST P-256 decrypt (ECDH)
-    "P-256-dec":  [0x12, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07],
+_OPENPGP_ALGO_SPECS: Tuple[OpenPgpAlgoSpec, ...] = (
+    OpenPgpAlgoSpec(
+        key="Ed25519",
+        label="Ed25519",
+        sign_attrs=(0x16, 0x2B, 0x06, 0x01, 0x04, 0x01, 0xDA, 0x47, 0x0F, 0x01),
+        decrypt_attrs=None,
+        aliases=("ed25519", "eddsa"),
+        is_25519=True,
+    ),
+    OpenPgpAlgoSpec(
+        key="Cv25519",
+        label="Cv25519 / X25519",
+        sign_attrs=None,
+        decrypt_attrs=(0x12, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x97, 0x55, 0x01, 0x05, 0x01),
+        aliases=("cv25519", "x25519", "curve25519"),
+        kdf_hash_id=0x08,
+        kdf_sym_id=0x09,
+        is_25519=True,
+    ),
+    OpenPgpAlgoSpec(
+        key="P-256",
+        label="NIST P-256",
+        sign_attrs=(0x13, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07),
+        decrypt_attrs=(0x12, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07),
+        aliases=("p256", "nistp256", "nist p256", "nist p-256", "secp256r1", "prime256v1"),
+        kdf_hash_id=0x08,
+        kdf_sym_id=0x07,
+    ),
+    OpenPgpAlgoSpec(
+        key="P-384",
+        label="NIST P-384",
+        sign_attrs=(0x13, 0x2B, 0x81, 0x04, 0x00, 0x22),
+        decrypt_attrs=(0x12, 0x2B, 0x81, 0x04, 0x00, 0x22),
+        aliases=("p384", "nistp384", "nist p384", "nist p-384", "secp384r1"),
+        kdf_hash_id=0x09,
+        kdf_sym_id=0x08,
+    ),
+    OpenPgpAlgoSpec(
+        key="P-521",
+        label="NIST P-521",
+        sign_attrs=(0x13, 0x2B, 0x81, 0x04, 0x00, 0x23),
+        decrypt_attrs=(0x12, 0x2B, 0x81, 0x04, 0x00, 0x23),
+        aliases=("p521", "nistp521", "nist p521", "nist p-521", "secp521r1"),
+        kdf_hash_id=0x0A,
+        kdf_sym_id=0x09,
+    ),
+    OpenPgpAlgoSpec(
+        key="BrainpoolP256R1",
+        label="Brainpool P256R1",
+        sign_attrs=(0x13, 0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07),
+        decrypt_attrs=(0x12, 0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07),
+        aliases=("brainpoolp256r1", "brainpool p256r1"),
+        kdf_hash_id=0x08,
+        kdf_sym_id=0x07,
+    ),
+    OpenPgpAlgoSpec(
+        key="BrainpoolP384R1",
+        label="Brainpool P384R1",
+        sign_attrs=(0x13, 0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0B),
+        decrypt_attrs=(0x12, 0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0B),
+        aliases=("brainpoolp384r1", "brainpool p384r1"),
+        kdf_hash_id=0x09,
+        kdf_sym_id=0x08,
+    ),
+    OpenPgpAlgoSpec(
+        key="BrainpoolP512R1",
+        label="Brainpool P512R1",
+        sign_attrs=(0x13, 0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0D),
+        decrypt_attrs=(0x12, 0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0D),
+        aliases=("brainpoolp512r1", "brainpool p512r1"),
+        kdf_hash_id=0x0A,
+        kdf_sym_id=0x09,
+    ),
+    OpenPgpAlgoSpec(
+        key="Secp256k1",
+        label="secp256k1",
+        sign_attrs=(0x13, 0x2B, 0x81, 0x04, 0x00, 0x0A),
+        decrypt_attrs=(0x12, 0x2B, 0x81, 0x04, 0x00, 0x0A),
+        aliases=("secp256k1",),
+        kdf_hash_id=0x08,
+        kdf_sym_id=0x07,
+    ),
+)
+
+_OPENPGP_ALGO_BY_KEY = {spec.key: spec for spec in _OPENPGP_ALGO_SPECS}
+_ENABLED_OPENPGP_ALGO_KEYS = frozenset({
+    "Ed25519",
+    "Cv25519",
+    "P-256",
+})
+_OPENPGP_ALGO_CHOICES = {
+    GpgKeySlot.SIGN: [
+        ("Ed25519 (Recommended)", "Ed25519"),
+        ("NIST P-256", "P-256"),
+    ],
+    GpgKeySlot.DECRYPT: [
+        ("Cv25519 / X25519 (Recommended)", "Cv25519"),
+        ("NIST P-256", "P-256"),
+    ],
+    GpgKeySlot.AUTH: [
+        ("Ed25519 (Recommended)", "Ed25519"),
+        ("NIST P-256", "P-256"),
+    ],
 }
 
 # CRT tags for GENERATE ASYM KEY
@@ -158,7 +262,83 @@ def _missing_gnupg_tool_message(tool: str) -> str:
     )
 
 
-def _compute_v4_fingerprint(timestamp: int, fp_algo: str, pubkey_raw: bytes) -> Optional[bytes]:
+def _normalize_algo_alias(name: str) -> str:
+    normalized = name.strip().lower().split(":", 1)[0]
+    normalized = normalized.split("(", 1)[0].strip()
+    if "/" in normalized:
+        normalized = normalized.split("/", 1)[0].strip()
+    return (
+        normalized.replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
+        .replace("/", "")
+    )
+
+
+def _find_openpgp_algo_spec(name: str) -> Optional[OpenPgpAlgoSpec]:
+    normalized = _normalize_algo_alias(name)
+    for spec in _OPENPGP_ALGO_SPECS:
+        if normalized == _normalize_algo_alias(spec.key):
+            return spec
+        if normalized in {_normalize_algo_alias(alias) for alias in spec.aliases}:
+            return spec
+    return None
+
+
+def _is_enabled_openpgp_algo(spec: OpenPgpAlgoSpec) -> bool:
+    return spec.key in _ENABLED_OPENPGP_ALGO_KEYS
+
+
+def supported_openpgp_algorithms(slot: GpgKeySlot) -> list[tuple[str, str]]:
+    return list(_OPENPGP_ALGO_CHOICES.get(slot, []))
+
+
+def supported_openpgp_algorithm_labels(slot: GpgKeySlot) -> list[str]:
+    return [normalize_openpgp_algorithm_label(value) for _, value in supported_openpgp_algorithms(slot)]
+
+
+def supported_openpgp_algorithm_summary(slot: GpgKeySlot) -> str:
+    return ", ".join(supported_openpgp_algorithm_labels(slot))
+
+
+def openpgp_candidate_matches_slot(slot: GpgKeySlot, algorithm_name: str) -> bool:
+    spec = _find_openpgp_algo_spec(algorithm_name)
+    if spec is None or not _is_enabled_openpgp_algo(spec):
+        return False
+    if slot == GpgKeySlot.DECRYPT:
+        return spec.decrypt_attrs is not None
+    return spec.sign_attrs is not None
+
+
+def normalize_openpgp_algorithm_label(name: str) -> str:
+    spec = _find_openpgp_algo_spec(name)
+    return spec.label if spec is not None else name
+
+
+def _strip_optional_pubkey_import_byte(attrs: List[int] | Tuple[int, ...]) -> Tuple[int, ...]:
+    if len(attrs) > 2 and attrs[-1] == 0xFF:
+        return tuple(attrs[:-1])
+    return tuple(attrs)
+
+
+def _get_algo_attrs_for_slot(spec: OpenPgpAlgoSpec, slot: GpgKeySlot) -> Optional[Tuple[int, ...]]:
+    if slot == GpgKeySlot.DECRYPT:
+        return spec.decrypt_attrs
+    return spec.sign_attrs
+
+
+def _leading_zero_bits(byte: int) -> int:
+    if byte == 0:
+        return 8
+    return 8 - byte.bit_length()
+
+
+def _compute_v4_fingerprint(
+    timestamp: int,
+    algo_name: str,
+    slot: GpgKeySlot,
+    pubkey_raw: bytes,
+) -> Optional[bytes]:
     """Compute OpenPGP v4 fingerprint (20-byte SHA-1) for an on-card generated key.
 
     Per RFC 4880 §12.2:
@@ -174,39 +354,32 @@ def _compute_v4_fingerprint(timestamp: int, fp_algo: str, pubkey_raw: bytes) -> 
       - Ed25519 / Cv25519: raw 32 bytes (no prefix)
       - NIST P-256:        0x04 || x(32) || y(32) = 65 bytes
     """
-    if fp_algo == "Ed25519":
-        algo_id = 22  # EdDSA
-        # OID 1.3.6.1.4.1.11591.15.1 (9 bytes, length-prefixed)
-        oid = bytes([0x09, 0x2B, 0x06, 0x01, 0x04, 0x01, 0xDA, 0x47, 0x0F, 0x01])
-        # MPI: value = 0x40 || key (33 bytes); 0x40=01000000b → 1 leading zero → 263 bits
-        mpi_val = bytes([0x40]) + pubkey_raw
-        key_material = oid + struct.pack(">H", 263) + mpi_val
-
-    elif fp_algo == "Cv25519":
-        algo_id = 18  # ECDH
-        # OID 1.3.6.1.4.1.3029.1.5.1 (10 bytes, length-prefixed)
-        oid = bytes([0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x97, 0x55, 0x01, 0x05, 0x01])
-        mpi_val = bytes([0x40]) + pubkey_raw
-        # KDF params: {len=3, ver=1, hash=SHA-256(8), sym=AES-256(9)}
-        kdf = bytes([0x03, 0x01, 0x08, 0x09])
-        key_material = oid + struct.pack(">H", 263) + mpi_val + kdf
-
-    elif fp_algo == "P-256-sign":
-        algo_id = 19  # ECDSA
-        # OID 1.2.840.10045.3.1.7 (8 bytes, length-prefixed)
-        oid = bytes([0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07])
-        # pubkey_raw = 0x04 || x || y = 65 bytes; 0x04=00000100b → 5 leading zeros → 515 bits
-        key_material = oid + struct.pack(">H", 515) + pubkey_raw
-
-    elif fp_algo == "P-256-dec":
-        algo_id = 18  # ECDH
-        oid = bytes([0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07])
-        # KDF params for NIST P-256 ECDH: {len=3, ver=1, hash=SHA-256(8), sym=AES-128(7)}
-        kdf = bytes([0x03, 0x01, 0x08, 0x07])
-        key_material = oid + struct.pack(">H", 515) + pubkey_raw + kdf
-
-    else:
+    spec = _find_openpgp_algo_spec(algo_name)
+    if spec is None:
         return None
+
+    attrs = _get_algo_attrs_for_slot(spec, slot)
+    if attrs is None:
+        return None
+
+    algo_id = 18 if slot == GpgKeySlot.DECRYPT else 19
+    oid_bytes = bytes(attrs[1:])
+    oid = bytes([len(oid_bytes)]) + oid_bytes
+
+    if spec.is_25519:
+        mpi_val = bytes([0x40]) + pubkey_raw
+        bit_length = len(mpi_val) * 8 - _leading_zero_bits(mpi_val[0])
+        key_material = oid + struct.pack(">H", bit_length) + mpi_val
+        if slot == GpgKeySlot.SIGN or slot == GpgKeySlot.AUTH:
+            algo_id = 22
+    else:
+        bit_length = len(pubkey_raw) * 8 - _leading_zero_bits(pubkey_raw[0])
+        key_material = oid + struct.pack(">H", bit_length) + pubkey_raw
+
+    if slot == GpgKeySlot.DECRYPT:
+        if spec.kdf_hash_id is None or spec.kdf_sym_id is None:
+            return None
+        key_material += bytes([0x03, 0x01, spec.kdf_hash_id, spec.kdf_sym_id])
 
     body = bytes([0x04]) + struct.pack(">I", timestamp) + bytes([algo_id]) + key_material
     packet = bytes([0x99]) + struct.pack(">H", len(body)) + body
@@ -217,15 +390,11 @@ def _algo_name_from_attrs(attrs: List[int]) -> Optional[str]:
     """Derive a human-readable algorithm name from attribute bytes."""
     if not attrs:
         return None
-    algo_id = attrs[0]
-    if algo_id == _ALGO_ID_EDDSA:
-        return "Ed25519"
-    if algo_id == _ALGO_ID_ECDH:
-        if len(attrs) >= 11 and attrs[1:9] == [0x2B, 0x06, 0x01, 0x04, 0x01, 0x97, 0x55, 0x01]:
-            return "Cv25519"
-        return "ECDH P-256"
-    if algo_id == _ALGO_ID_ECDSA:
-        return "NIST P-256"
+    normalized = _strip_optional_pubkey_import_byte(attrs)
+    for spec in _OPENPGP_ALGO_SPECS:
+        if spec.sign_attrs == normalized or spec.decrypt_attrs == normalized:
+            return spec.label
+    algo_id = normalized[0]
     if algo_id == _ALGO_ID_RSA:
         return "RSA"
     return f"Unknown(0x{algo_id:02X})"
@@ -291,7 +460,7 @@ class GpgWorker(QObject):
 
     gpg_probed = Signal(bool)                       # PCSC available + AID selectable
     status_loaded = Signal(list, dict)              # list[GpgKeyInfo], pw_status dict
-    key_generated = Signal(bool, str, bytes, object)  # success, error, pubkey_bytes, slot
+    key_generated = Signal(bool, str, bytes, object, object)  # success, error, pubkey_bytes, slot, algo
     public_key_exported = Signal(bool, str, bytes, object, object)  # success, error, raw pubkey bytes, slot, algo
     keys_imported = Signal(bool, str, object)       # success, error, list[GpgKeySlot]
     pin_changed = Signal(bool, str)                 # success, message
@@ -608,13 +777,12 @@ class GpgWorker(QObject):
             )
 
     def _format_import_algorithm(self, algo_id: str, curve_name: str) -> str:
-        curve = curve_name.lower()
-        if curve == "ed25519":
-            return "Ed25519"
-        if curve == "cv25519":
-            return "Cv25519"
-        if curve == "nistp256":
-            return "NIST P-256"
+        normalized_curve = curve_name.strip()
+        if normalized_curve:
+            spec = _find_openpgp_algo_spec(normalized_curve)
+            if spec is not None:
+                return spec.label
+            return normalized_curve
         if curve_name:
             return curve_name
         return {
@@ -717,6 +885,12 @@ class GpgWorker(QObject):
                     for slot in ordered_slots:
                         if slot_mapping[slot] not in candidates:
                             raise RuntimeError(f"Selected key for {slot.value} slot is not available in the imported keyring")
+                        candidate = candidates[slot_mapping[slot]]
+                        if not openpgp_candidate_matches_slot(slot, candidate.algorithm):
+                            raise RuntimeError(
+                                f"{normalize_openpgp_algorithm_label(candidate.algorithm)} is not supported for the {slot.value} slot "
+                                f"on this firmware. Supported algorithms: {supported_openpgp_algorithm_summary(slot)}."
+                            )
                     self._warm_secret_key_cache(
                         gnupghome,
                         [candidates[slot_mapping[slot]].fingerprint for slot in ordered_slots],
@@ -797,42 +971,32 @@ class GpgWorker(QObject):
     def generate_key(self, slot: GpgKeySlot, algo_name: str, admin_pin: str) -> None:
         """Generate a key in the given slot.
 
-        algo_name: "Ed25519", "Cv25519", or "P-256"
+        algo_name: canonical OpenPGP algorithm key for this slot
         admin_pin: the Admin PIN (PW3), required for key generation.
         """
         if not PCSC_AVAILABLE:
-            self.key_generated.emit(False, "PCSC not available", b"", slot)
+            self.key_generated.emit(False, "PCSC not available", b"", slot, algo_name)
             return
         try:
             if not self._connect():
-                self.key_generated.emit(False, "Cannot connect to card reader", b"", slot)
+                self.key_generated.emit(False, "Cannot connect to card reader", b"", slot, algo_name)
                 return
             if not self._select_gpg_aid():
                 self._disconnect()
-                self.key_generated.emit(False, "OpenPGP applet not found", b"", slot)
+                self.key_generated.emit(False, "OpenPGP applet not found", b"", slot, algo_name)
                 return
 
-            # Choose attribute bytes and fingerprint algo name based on slot + algo
-            if algo_name == "P-256":
-                if slot == GpgKeySlot.DECRYPT:
-                    attrs = ALGO_ATTRS["P-256-dec"]
-                    fp_algo = "P-256-dec"
-                else:
-                    attrs = ALGO_ATTRS["P-256-sign"]
-                    fp_algo = "P-256-sign"
-            elif algo_name == "Ed25519":
-                if slot == GpgKeySlot.DECRYPT:
-                    attrs = ALGO_ATTRS["Cv25519"]
-                    fp_algo = "Cv25519"
-                else:
-                    attrs = ALGO_ATTRS["Ed25519"]
-                    fp_algo = "Ed25519"
-            elif algo_name == "Cv25519":
-                attrs = ALGO_ATTRS["Cv25519"]
-                fp_algo = "Cv25519"
-            else:
+            spec = _find_openpgp_algo_spec(algo_name)
+            attrs = _get_algo_attrs_for_slot(spec, slot) if spec is not None else None
+            if spec is None or attrs is None or not _is_enabled_openpgp_algo(spec):
                 self._disconnect()
-                self.key_generated.emit(False, f"Unknown algorithm: {algo_name}", b"", slot)
+                self.key_generated.emit(
+                    False,
+                    f"Unsupported algorithm for this firmware build: {algo_name}",
+                    b"",
+                    slot,
+                    algo_name,
+                )
                 return
 
             # VERIFY PW3 (Admin PIN) — must happen before any PUT DATA
@@ -841,17 +1005,21 @@ class GpgWorker(QObject):
             if not (sw1 == 0x90 and sw2 == 0x00):
                 self._disconnect()
                 self.key_generated.emit(
-                    False, f"Admin PIN rejected: {self._sw_to_str(sw1, sw2)}", b"", slot
+                    False, f"Admin PIN rejected: {self._sw_to_str(sw1, sw2)}", b"", slot, algo_name
                 )
                 return
 
             # PUT DATA: set algorithm attributes
             tag = _SLOT_ALGO_TAG[slot]
-            _, sw1, sw2 = self._send_apdu(0x00, INS_PUT_DATA, 0x00, tag, attrs)
+            _, sw1, sw2 = self._send_apdu(0x00, INS_PUT_DATA, 0x00, tag, list(attrs))
             if not (sw1 == 0x90 and sw2 == 0x00):
                 self._disconnect()
                 self.key_generated.emit(
-                    False, f"Failed to set algo attrs: {self._sw_to_str(sw1, sw2)}", b"", slot
+                    False,
+                    f"Failed to set algo attrs: {self._sw_to_str(sw1, sw2)}",
+                    b"",
+                    slot,
+                    algo_name,
                 )
                 return
 
@@ -863,7 +1031,11 @@ class GpgWorker(QObject):
             if not (sw1 == 0x90 and sw2 == 0x00):
                 self._disconnect()
                 self.key_generated.emit(
-                    False, f"Key generation failed: {self._sw_to_str(sw1, sw2)}", b"", slot
+                    False,
+                    f"Key generation failed: {self._sw_to_str(sw1, sw2)}",
+                    b"",
+                    slot,
+                    algo_name,
                 )
                 return
 
@@ -873,7 +1045,7 @@ class GpgWorker(QObject):
             pubkey_raw = self._parse_pubkey_from_response(resp)
             pubkey_bytes = pubkey_raw if pubkey_raw is not None else bytes(resp)
             if pubkey_raw is not None:
-                fp = _compute_v4_fingerprint(ts, fp_algo, pubkey_raw)
+                fp = _compute_v4_fingerprint(ts, algo_name, slot, pubkey_raw)
                 if fp is not None:
                     # Timestamp (4-byte big-endian Unix time)
                     ts_data = list(struct.pack(">I", ts))
@@ -882,11 +1054,11 @@ class GpgWorker(QObject):
                     self._send_apdu(0x00, INS_PUT_DATA, 0x00, _SLOT_FP_TAG[slot], list(fp))
 
             self._disconnect()
-            self.key_generated.emit(True, "", pubkey_bytes, slot)
+            self.key_generated.emit(True, "", pubkey_bytes, slot, spec.label)
 
         except Exception as e:
             self._disconnect()
-            self.key_generated.emit(False, str(e), b"", slot)
+            self.key_generated.emit(False, str(e), b"", slot, algo_name)
 
     def change_user_pin(self, old_pin: str, new_pin: str) -> None:
         """Change User PIN (PW1, P2=81)."""
