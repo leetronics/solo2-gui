@@ -84,6 +84,37 @@ def _get_warning_colors() -> dict:
     }
 
 
+def _get_action_button_colors() -> dict:
+    """Get theme-aware colors for slot action buttons."""
+    if _is_dark_mode():
+        return {
+            'primary_bg': '#2a7ae2',
+            'primary_hover': '#1a5ab2',
+            'primary_disabled': '#475569',
+            'primary_text': '#ffffff',
+            'secondary_bg': '#3a3a3a',
+            'secondary_hover': '#474747',
+            'secondary_disabled_bg': '#2f2f2f',
+            'secondary_border': '#5a5a5a',
+            'secondary_disabled_border': '#474747',
+            'secondary_text': '#e0e0e0',
+            'secondary_disabled_text': '#888888',
+        }
+    return {
+        'primary_bg': '#2a7ae2',
+        'primary_hover': '#1a5ab2',
+        'primary_disabled': '#9cbbe9',
+        'primary_text': '#ffffff',
+        'secondary_bg': '#ffffff',
+        'secondary_hover': '#f5f7fb',
+        'secondary_disabled_bg': '#f3f3f3',
+        'secondary_border': '#c6ccd5',
+        'secondary_disabled_border': '#d8d8d8',
+        'secondary_text': '#1f2937',
+        'secondary_disabled_text': '#8a8a8a',
+    }
+
+
 def _get_pcsc_help_text() -> str:
     """Get platform-specific PCSC help text."""
     system = platform.system()
@@ -331,6 +362,9 @@ class KeySlotCard(QFrame):
     def __init__(self, slot: GpgKeySlot, parent=None):
         super().__init__(parent)
         self._slot = slot
+        self._has_key = False
+        self._controls_enabled = True
+        self._import_enabled = _gnupg_import_tools_available()
         name, badge = _SLOT_META.get(slot, (str(slot), "??"))
 
         colors = _get_card_colors()
@@ -368,12 +402,6 @@ class KeySlotCard(QFrame):
 
         self._btn_generate = QPushButton("Generate Key")
         self._btn_generate.setToolTip("Generate a new key pair in this slot")
-        self._btn_generate.setStyleSheet(
-            "QPushButton { color: white; background: #2a7ae2; border-radius: 3px; "
-            "padding: 2px 8px; } "
-            "QPushButton:hover { background: #1a5ab2; } "
-            "QPushButton:disabled { background: #aaa; }"
-        )
         self._btn_generate.clicked.connect(lambda: self.generate_requested.emit(self._slot))
 
         self._btn_import = QPushButton("Import Key")
@@ -381,12 +409,6 @@ class KeySlotCard(QFrame):
             _missing_gnupg_help_text()
             if not _gnupg_import_tools_available()
             else "Import an existing secret key into this slot"
-        )
-        self._btn_import.setStyleSheet(
-            "QPushButton { border: 1px solid #bbb; border-radius: 3px; "
-            "padding: 2px 8px; } "
-            "QPushButton:hover { background: #f0f0f0; } "
-            "QPushButton:disabled { background: #aaa; }"
         )
         self._btn_import.clicked.connect(lambda: self.import_requested.emit(self._slot))
 
@@ -414,11 +436,50 @@ class KeySlotCard(QFrame):
 
         outer.addLayout(row1)
         outer.addLayout(row2)
+        self._apply_action_styles()
+
+    def _button_style(self, primary: bool) -> str:
+        colors = _get_action_button_colors()
+        if primary:
+            return (
+                "QPushButton { "
+                f"color: {colors['primary_text']}; "
+                f"background: {colors['primary_bg']}; "
+                f"border: 1px solid {colors['primary_bg']}; "
+                "border-radius: 3px; padding: 2px 8px; font-weight: 600; } "
+                "QPushButton:hover { "
+                f"background: {colors['primary_hover']}; border-color: {colors['primary_hover']}; }} "
+                "QPushButton:disabled { "
+                f"background: {colors['primary_disabled']}; border-color: {colors['primary_disabled']}; "
+                f"color: {colors['primary_text']}; }}"
+            )
+        return (
+            "QPushButton { "
+            f"color: {colors['secondary_text']}; "
+            f"background: {colors['secondary_bg']}; "
+            f"border: 1px solid {colors['secondary_border']}; "
+            "border-radius: 3px; padding: 2px 8px; } "
+            "QPushButton:hover { "
+            f"background: {colors['secondary_hover']}; }} "
+            "QPushButton:disabled { "
+            f"background: {colors['secondary_disabled_bg']}; "
+            f"border-color: {colors['secondary_disabled_border']}; "
+            f"color: {colors['secondary_disabled_text']}; }}"
+        )
+
+    def _apply_action_styles(self) -> None:
+        primary_button = self._btn_export if self._has_key else (
+            self._btn_import if self._import_enabled else self._btn_generate
+        )
+        for button in (self._btn_generate, self._btn_import, self._btn_export):
+            button.setStyleSheet(self._button_style(button is primary_button))
 
     def update_key_info(self, info: GpgKeyInfo) -> None:
         """Refresh card display from a GpgKeyInfo."""
         colors = _get_card_colors()
+        self._has_key = info.has_key
         self._btn_export.setVisible(info.has_key)
+        self._apply_action_styles()
         if not info.has_key:
             self._status_label.setText("No key")
             self._status_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 10pt;")
@@ -435,11 +496,16 @@ class KeySlotCard(QFrame):
             self._status_label.setStyleSheet(f"color: {colors['text']}; font-size: 10pt;")
 
     def set_controls_enabled(self, enabled: bool) -> None:
+        self._controls_enabled = enabled
         self._btn_generate.setEnabled(enabled)
         self._btn_export.setEnabled(enabled)
+        self._btn_import.setEnabled(enabled and self._import_enabled)
+        self._apply_action_styles()
 
     def set_import_enabled(self, enabled: bool) -> None:
-        self._btn_import.setEnabled(enabled)
+        self._import_enabled = enabled
+        self._btn_import.setEnabled(self._controls_enabled and enabled)
+        self._apply_action_styles()
 
 
 class GpgTab(QWidget):

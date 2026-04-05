@@ -74,6 +74,37 @@ def _get_warning_colors() -> dict:
         'text': '#664d03',
     }
 
+
+def _get_action_button_colors() -> dict:
+    """Get theme-aware colors for slot action buttons."""
+    if _is_dark_mode():
+        return {
+            'primary_bg': '#2a7ae2',
+            'primary_hover': '#1a5ab2',
+            'primary_disabled': '#475569',
+            'primary_text': '#ffffff',
+            'secondary_bg': '#3a3a3a',
+            'secondary_hover': '#474747',
+            'secondary_disabled_bg': '#2f2f2f',
+            'secondary_border': '#5a5a5a',
+            'secondary_disabled_border': '#474747',
+            'secondary_text': '#e0e0e0',
+            'secondary_disabled_text': '#888888',
+        }
+    return {
+        'primary_bg': '#2a7ae2',
+        'primary_hover': '#1a5ab2',
+        'primary_disabled': '#9cbbe9',
+        'primary_text': '#ffffff',
+        'secondary_bg': '#ffffff',
+        'secondary_hover': '#f5f7fb',
+        'secondary_disabled_bg': '#f3f3f3',
+        'secondary_border': '#c6ccd5',
+        'secondary_disabled_border': '#d8d8d8',
+        'secondary_text': '#1f2937',
+        'secondary_disabled_text': '#8a8a8a',
+    }
+
 from solo_gui.models.device import SoloDevice
 from solo_gui.models.device import firmware_supports_extended_applets
 from solo_gui.workers.piv_worker import (
@@ -275,6 +306,8 @@ class SlotCard(QFrame):
     def __init__(self, slot: PivSlot, parent=None):
         super().__init__(parent)
         self._slot = slot
+        self._has_key = False
+        self._has_cert = False
         name, hex_id = _SLOT_META.get(slot, (str(slot), "??"))
 
         colors = _get_card_colors()
@@ -312,19 +345,13 @@ class SlotCard(QFrame):
 
         self._btn_generate = QPushButton("Generate Key")
         self._btn_generate.setToolTip("Generate a new key pair")
-        self._btn_generate.setStyleSheet(
-            "QPushButton { color: white; background: #2a7ae2; border-radius: 3px; "
-            "padding: 2px 8px; } "
-            "QPushButton:hover { background: #1a5ab2; } "
-            "QPushButton:disabled { background: #aaa; }"
-        )
         self._btn_generate.clicked.connect(lambda: self.generate_requested.emit(self._slot))
 
         self._btn_import = QPushButton("Import Cert")
         self._btn_import.setToolTip("Import an X.509 certificate")
         self._btn_import.clicked.connect(lambda: self.import_cert_requested.emit(self._slot))
 
-        self._btn_export = QPushButton("Export")
+        self._btn_export = QPushButton("Export Cert")
         self._btn_export.setToolTip("Export certificate to file")
         self._btn_export.clicked.connect(lambda: self.export_cert_requested.emit(self._slot))
         self._btn_export.setVisible(False)
@@ -359,16 +386,59 @@ class SlotCard(QFrame):
 
         outer.addLayout(row1)
         outer.addLayout(row2)
+        self._apply_action_styles()
+
+    def _button_style(self, primary: bool) -> str:
+        colors = _get_action_button_colors()
+        if primary:
+            return (
+                "QPushButton { "
+                f"color: {colors['primary_text']}; "
+                f"background: {colors['primary_bg']}; "
+                f"border: 1px solid {colors['primary_bg']}; "
+                "border-radius: 3px; padding: 2px 8px; font-weight: 600; } "
+                "QPushButton:hover { "
+                f"background: {colors['primary_hover']}; border-color: {colors['primary_hover']}; }} "
+                "QPushButton:disabled { "
+                f"background: {colors['primary_disabled']}; border-color: {colors['primary_disabled']}; "
+                f"color: {colors['primary_text']}; }}"
+            )
+        return (
+            "QPushButton { "
+            f"color: {colors['secondary_text']}; "
+            f"background: {colors['secondary_bg']}; "
+            f"border: 1px solid {colors['secondary_border']}; "
+            "border-radius: 3px; padding: 2px 8px; } "
+            "QPushButton:hover { "
+            f"background: {colors['secondary_hover']}; }} "
+            "QPushButton:disabled { "
+            f"background: {colors['secondary_disabled_bg']}; "
+            f"border-color: {colors['secondary_disabled_border']}; "
+            f"color: {colors['secondary_disabled_text']}; }}"
+        )
+
+    def _apply_action_styles(self) -> None:
+        if self._has_cert:
+            primary_button = self._btn_export
+        elif self._has_key:
+            primary_button = self._btn_import
+        else:
+            primary_button = self._btn_generate
+        for button in (self._btn_generate, self._btn_import, self._btn_export):
+            button.setStyleSheet(self._button_style(button is primary_button))
 
     def update_slot(self, slot_info: SlotInfo) -> None:
         """Refresh card display from a SlotInfo."""
         colors = _get_card_colors()
         has_key = slot_info.has_key
         has_cert = slot_info.certificate is not None
+        self._has_key = has_key
+        self._has_cert = has_cert
         key_type = slot_info.key_type_str
 
         self._btn_export.setVisible(has_cert)
         self._btn_delete.setVisible(has_key or has_cert)
+        self._apply_action_styles()
 
         if not has_key and not has_cert:
             self._status_label.setText("No key")
@@ -398,6 +468,7 @@ class SlotCard(QFrame):
         self._btn_import.setEnabled(enabled)
         self._btn_export.setEnabled(enabled)
         self._btn_delete.setEnabled(enabled)
+        self._apply_action_styles()
 
     def _short_subject(self, subject: str) -> str:
         m = re.search(r'CN=([^,]+)', subject, re.IGNORECASE)
