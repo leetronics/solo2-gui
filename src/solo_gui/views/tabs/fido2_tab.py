@@ -169,8 +169,18 @@ class Fido2Tab(QWidget):
         layout = QVBoxLayout(self)
 
         # Credentials Group
-        credentials_group = QGroupBox("FIDO2 Credentials")
+        credentials_group = QGroupBox("Resident Credentials (Passkeys)")
         credentials_layout = QVBoxLayout(credentials_group)
+
+        intro = QLabel(
+            "Resident credentials — also called <b>passkeys</b> or discoverable credentials — "
+            "are FIDO2 logins stored directly on this device. "
+            "They let you sign in without typing a username; "
+            "the device itself knows which account to use."
+        )
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.RichText)
+        credentials_layout.addWidget(intro)
 
         # Credentials table
         self._credentials_table = QTableWidget()
@@ -193,11 +203,13 @@ class Fido2Tab(QWidget):
 
         # Explain the discoverable-only limitation
         note = QLabel(
-            "Only discoverable (resident) credentials are listed here. "
-            "Standard website logins and SSH keys created without -O resident "
-            "are not stored on the device and cannot be enumerated."
+            "Only the credentials above are shown. "
+            "Most everyday FIDO2 logins are <i>non-resident</i>: "
+            "the credential ID is kept by the website, not stored on the device, "
+            "so they cannot be listed or managed here."
         )
         note.setWordWrap(True)
+        note.setTextFormat(Qt.RichText)
         note.setStyleSheet("color: gray; font-size: 11px;")
         credentials_layout.addWidget(note)
 
