@@ -41,12 +41,6 @@ class PivKeyType(Enum):
     ECC_P384 = "eccp384"
 
 
-class PivTouchPolicy(Enum):
-    """PIV touch policies for generated keys."""
-
-    NEVER = "never"
-    ALWAYS = "always"
-    CACHED = "cached"
 
 
 class PivSlot(Enum):
@@ -98,11 +92,6 @@ ALGORITHM_ID = {
     PivKeyType.ECC_P384: 0x14,
 }
 
-TOUCH_POLICY_ID = {
-    PivTouchPolicy.NEVER: 0x01,
-    PivTouchPolicy.ALWAYS: 0x02,
-    PivTouchPolicy.CACHED: 0x03,
-}
 
 
 @dataclass
@@ -500,8 +489,13 @@ class PivWorker(QObject):
             if not tlvs:
                 return False, None
 
-            # Some firmware builds return a bare policy TLV (0x02) even for empty slots.
-            # Treat the slot as populated only when we see algorithm/origin/public-key data.
+            # piv-authenticator v0.6.0 only implements GET METADATA for 9E and returns
+            # a bare policy TLV there when the card-auth key exists.
+            if slot == PivSlot.CARD_AUTH and tlvs == {0x02: b"\x01\x00"}:
+                return True, None
+
+            # For the other slots, treat the slot as populated only when we see
+            # algorithm/origin/public-key data.
             has_real_metadata = any(tag in tlvs for tag in (0x01, 0x03, 0x04))
             if not has_real_metadata:
                 return False, None
@@ -550,9 +544,10 @@ class PivWorker(QObject):
             except Exception:
                 continue
 
-            # 9000 / 61xx = operation succeeded. 6985 often means touch policy blocked
-            # completion, which still proves the slot contains a usable private key.
-            if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61 or (sw1 == 0x69 and sw2 == 0x85):
+            # On piv-authenticator v0.6.0, a successful GENERAL AUTHENTICATE probe is
+            # the only reliable positive signal for 9A/9C/9D. Error codes such as 6985
+            # are also used for empty slots, so they must not be treated as proof.
+            if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61:
                 return key_type
 
         return None
@@ -901,7 +896,6 @@ class PivWorker(QObject):
         key_type: PivKeyType,
         pin: Optional[str] = None,
         mgmt_key: str = DEFAULT_MANAGEMENT_KEY,
-        touch_policy: Optional[PivTouchPolicy] = None,
     ) -> None:
         """Generate a new PIV key in the specified slot."""
         if not self.check_pcsc_available():
@@ -931,10 +925,7 @@ class PivWorker(QObject):
                 self.key_generated.emit(False, "Invalid slot or key type", b"", None)
                 return
 
-            template_body = [0x80, 0x01, alg_id]
-            if touch_policy is not None:
-                template_body.extend([0xAB, 0x01, TOUCH_POLICY_ID[touch_policy]])
-            template = [0xAC] + self._encode_length(len(template_body)) + template_body
+            template = [0xAC, 0x03, 0x80, 0x01, alg_id]
 
             response, sw1, sw2 = self._send_apdu(
                 INS_GENERATE_ASYMMETRIC, 0x00, key_ref, template, 0x00

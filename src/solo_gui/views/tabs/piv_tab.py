@@ -137,7 +137,6 @@ from solo_gui.workers.piv_worker import (
     PivCertificate,
     PivSlot,
     PivKeyType,
-    PivTouchPolicy,
     SlotInfo,
     PCSC_AVAILABLE,
     DEFAULT_MANAGEMENT_KEY,
@@ -273,12 +272,6 @@ class GenerateKeyDialog(QDialog):
         self._algo_combo.addItem("ECC P-384", PivKeyType.ECC_P384)
         form_layout.addRow("Algorithm:", self._algo_combo)
 
-        self._touch_policy_combo = QComboBox()
-        self._touch_policy_combo.addItem("Never (Default)", PivTouchPolicy.NEVER)
-        self._touch_policy_combo.addItem("Always", PivTouchPolicy.ALWAYS)
-        self._touch_policy_combo.addItem("Cached (15s)", PivTouchPolicy.CACHED)
-        form_layout.addRow("Touch Policy:", self._touch_policy_combo)
-
         # PIN input
         self._pin_input = QLineEdit()
         self._pin_input.setEchoMode(QLineEdit.Password)
@@ -323,9 +316,6 @@ class GenerateKeyDialog(QDialog):
 
     def get_mgmt_key(self) -> str:
         return self._mgmt_key_input.text()
-
-    def get_touch_policy(self) -> PivTouchPolicy:
-        return self._touch_policy_combo.currentData()
 
 
 class SlotCard(QFrame):
@@ -661,8 +651,7 @@ class PivTab(QWidget):
         pin_main.addWidget(reset_hint)
 
         probe_hint = QLabel(
-            "If a slot still looks empty after reconnect, you can verify the PIN once to actively probe hidden keys. "
-            "If a slot uses touch policy, touch the key during probing."
+            "If a slot still looks empty after reconnect, you can verify the PIN once to actively probe hidden keys."
         )
         probe_hint.setWordWrap(True)
         probe_hint.setStyleSheet("color: gray; font-size: 10px;")
@@ -670,8 +659,7 @@ class PivTab(QWidget):
 
         self._probe_keys_button = QPushButton("Verify PIN to Probe Keys")
         self._probe_keys_button.setToolTip(
-            "Use your PIN once to probe slots that do not expose reliable metadata after reconnect. "
-            "Some slots may also require touch."
+            "Use your PIN once to probe slots that do not expose reliable metadata after reconnect."
         )
         self._probe_keys_button.clicked.connect(self._probe_keys_with_pin)
         pin_main.addWidget(self._probe_keys_button)
@@ -1136,7 +1124,6 @@ class PivTab(QWidget):
                 slot, dialog.get_key_type(),
                 dialog.get_pin() or None,
                 dialog.get_mgmt_key(),
-                dialog.get_touch_policy(),
             )
 
     def _import_certificate_for(self, slot: PivSlot) -> None:
