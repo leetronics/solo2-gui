@@ -5,7 +5,7 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QGroupBox, QGridLayout, QPushButton,
-    QProgressBar, QMessageBox, QLineEdit, QFileDialog
+    QProgressBar, QMessageBox, QLineEdit, QFileDialog, QPlainTextEdit
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
@@ -88,26 +88,28 @@ class OverviewTab(QWidget):
         self._flash_file_btn.clicked.connect(self._flash_from_file)
         flash_layout.addWidget(self._flash_file_btn)
 
-        # Status
-        status_layout = QHBoxLayout()
-        status_layout.addWidget(QLabel("Status:"))
+        # Flash log + progress (hidden until a flash operation starts)
+        self._log_group = QGroupBox("Flash Output")
+        log_layout = QVBoxLayout(self._log_group)
+        self._log_area = QPlainTextEdit()
+        self._log_area.setReadOnly(True)
+        self._log_area.setFixedHeight(110)
+        log_layout.addWidget(self._log_area)
         self._status_progress = QProgressBar()
         self._status_progress.setRange(0, 100)
         self._status_progress.setVisible(False)
-        self._status_label = QLabel("Ready")
-        status_layout.addWidget(self._status_label)
-        status_layout.addWidget(self._status_progress)
-        status_layout.addStretch()
+        log_layout.addWidget(self._status_progress)
 
         layout.addWidget(info_group)
         layout.addWidget(firmware_group)
         layout.addWidget(self._flash_group)
-        layout.addLayout(status_layout)
+        layout.addWidget(self._log_group)
         layout.addStretch()
 
         self._check_updates_button.setEnabled(False)
         self._flash_file_btn.setEnabled(False)
         self._flash_group.setVisible(False)
+        self._log_group.setVisible(False)
 
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
@@ -194,10 +196,14 @@ class OverviewTab(QWidget):
         self._download_update_button.setVisible(False)
         self._flash_group.setVisible(False)
         self._flash_file_input.clear()
+        self._status_progress.setVisible(False)
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self._status_progress.setVisible(busy)
-        self._status_label.setText(message if busy else "Ready")
+        if busy and message:
+            self._log_group.setVisible(True)
+            self._log_area.clear()
+            self._log_area.appendPlainText(message)
 
     def _check_firmware_updates(self) -> None:
         if not self._device or not self._firmware_worker:
@@ -257,7 +263,10 @@ class OverviewTab(QWidget):
     def _on_firmware_progress(self, progress: int, message: str) -> None:
         self._status_progress.setVisible(True)
         self._status_progress.setValue(progress)
-        self._status_label.setText(message)
+        self._log_area.appendPlainText(message)
+        self._log_area.verticalScrollBar().setValue(
+            self._log_area.verticalScrollBar().maximum()
+        )
 
     def _on_firmware_info(self, firmware_info: object) -> None:
         self._set_busy(False)
@@ -278,6 +287,7 @@ class OverviewTab(QWidget):
         self._set_busy(False)
         self._check_updates_button.setEnabled(self._device is not None)
         self._flash_file_btn.setEnabled(self._device is not None)
+        self._log_area.appendPlainText(message)
         if success:
             QMessageBox.information(self, "Update Complete", message)
         else:
@@ -287,5 +297,5 @@ class OverviewTab(QWidget):
         self._set_busy(False)
         self._check_updates_button.setEnabled(self._device is not None)
         self._flash_file_btn.setEnabled(self._device is not None)
-        self._status_label.setText(f"Error: {error}")
+        self._log_area.appendPlainText(f"Error: {error}")
         QMessageBox.critical(self, "Firmware Error", error)

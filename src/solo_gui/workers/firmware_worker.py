@@ -240,21 +240,30 @@ class FirmwareUpdateWorker(QObject):
                 return
 
             self._flash_firmware_bytes(firmware_data)
+            # Ensure device exits bootloader mode — bl.reset() inside
+            # _flash_firmware_bytes may not reach the device before the HID
+            # session closes, so we try once more with a fresh session.
+            try:
+                self.reboot_to_regular()
+            except Exception:
+                pass
             self.update_progress.emit(100, completion_label)
             self.update_completed.emit(True, success_message)
 
         except BootloaderError as exc:
-            self.update_completed.emit(False, f"Bootloader error: {exc}")
+            error_msg = str(exc)
             try:
                 self.reboot_to_regular()
             except Exception:
                 pass
+            self.update_completed.emit(False, f"Bootloader error: {error_msg}")
         except Exception as exc:
-            self.update_completed.emit(False, f"Flash failed: {exc}")
+            error_msg = str(exc)
             try:
                 self.reboot_to_regular()
             except Exception:
                 pass
+            self.update_completed.emit(False, f"Flash failed: {error_msg}")
 
     def perform_update(self, firmware_info: FirmwareInfo) -> None:
         """Perform complete firmware update process."""
@@ -300,16 +309,22 @@ class FirmwareUpdateWorker(QObject):
 
     def _flash_firmware_bytes(self, firmware_data: bytes) -> None:
         """Flash firmware bytes via the MCU bootloader HID protocol."""
-        self.update_progress.emit(50, "Rebooting device to bootloader…")
+        size_kb = len(firmware_data) // 1024
+        use_sb2 = _is_sb2_file(firmware_data)
+        fmt = "SB2.1 (signed)" if use_sb2 else "raw binary"
+        self.update_progress.emit(48, f"Firmware ready: {size_kb} KB ({fmt})")
+
+        self.update_progress.emit(50, "Sending reboot-to-bootloader command…")
         try:
             AdminSession(self._device).reboot(RebootMode.BOOTLOADER)
+            self.update_progress.emit(52, "Reboot command accepted — touch button if prompted")
         except Exception:
-            pass
+            self.update_progress.emit(52, "Reboot command sent (no confirmation)")
 
-        self.update_progress.emit(55, "Waiting for bootloader…")
-        time.sleep(1.0)
+        self.update_progress.emit(54, "Waiting for bootloader to appear…")
+        time.sleep(2.0)
 
-        use_sb2 = _is_sb2_file(firmware_data)
+        self.update_progress.emit(56, "Searching for bootloader device…")
 
         def _progress(written: int, total_bytes: int) -> None:
             pct = 65 + int(written / total_bytes * 25)
@@ -318,13 +333,15 @@ class FirmwareUpdateWorker(QObject):
             )
 
         with BootloaderSession.find(timeout=15) as bl:
+            self.update_progress.emit(60, "Bootloader connected")
             if use_sb2:
-                self.update_progress.emit(60, "Sending SB2.1 signed firmware…")
+                self.update_progress.emit(62, "Sending SB2.1 signed firmware…")
                 bl.receive_sb_file(firmware_data, progress_cb=_progress)
             else:
-                self.update_progress.emit(60, "Erasing flash…")
+                self.update_progress.emit(62, "Erasing flash…")
                 bl.write_flash(firmware_data, progress_cb=_progress)
-            self.update_progress.emit(92, "Rebooting device…")
+            self.update_progress.emit(92, "Write complete — sending reset command…")
+            time.sleep(0.5)  # give bootloader time to finalize before reset
             bl.reset()
 
     def flash_from_file(self, path: str) -> None:
