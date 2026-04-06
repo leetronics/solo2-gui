@@ -8,11 +8,15 @@ Solo2 admin app commands for device management:
 Uses DeviceManager for thread-safe device access.
 """
 
+import logging
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
-from solo2.admin import AdminCommand, DeviceDiagnostics, RebootMode
+_log = logging.getLogger("solo_gui.admin_worker")
+
+from solo2.admin import AdminCommand, AdminSession, DeviceDiagnostics, RebootMode
+from solo2 import lpc55_isp
 from solo_gui.device_manager import DeviceManager
 
 
@@ -27,6 +31,7 @@ class AdminWorker(QObject):
     uuid_ready = Signal(str)
     reboot_requested = Signal(int)
     device_disconnected = Signal()
+    variant_ready = Signal(str)
 
     def __init__(self, device):
         super().__init__()
@@ -159,6 +164,52 @@ class AdminWorker(QObject):
                 self.operation_completed.emit(True, "FIDO2 and Secrets/Vault data have been reset")
 
         self._device_manager.reset(on_reset, operation_id="admin_reset")
+
+    def check_variant(self) -> None:
+        """
+        Detect Hacker/Secure variant via MCUBOOT ISP.
+
+        If the device is already known to be unlocked (variant == "Hacker"), returns
+        "Hacker (unlocked)" immediately without rebooting.
+
+        Otherwise reboots to bootloader, probes CMPA via MCUBOOT ISP:
+          "Secure"          — ISP read blocked (genuine Secure device)
+          "Hacker (locked)" — ISP read allowed (Hacker device, Secure Boot still active)
+        """
+        # Fast path: firmware already confirmed the device is unlocked
+        if getattr(self._device, "variant", "") == "Hacker":
+            self.operation_completed.emit(True, "Variant: Hacker (unlocked)")
+            self.variant_ready.emit("Hacker (unlocked)")
+            return
+
+        self.operation_started.emit("Checking device variant via hardware ISP…")
+
+        # Reboot to bootloader (device will disconnect — exception is expected)
+        try:
+            AdminSession(self._device).reboot(RebootMode.BOOTLOADER)
+        except Exception as exc:
+            _log.debug("check_variant: reboot-to-bootloader raised (expected): %s", exc)
+
+        # Wait for the bootloader USB device to appear
+        self.operation_progress.emit(30, "Waiting for bootloader…")
+        if not lpc55_isp.wait_for_bootloader(timeout_s=10.0):
+            self.error_occurred.emit(
+                "Bootloader device did not appear within 10 s.\n"
+                "Make sure the device is connected and try again."
+            )
+            return
+
+        # ISP variant probe
+        self.operation_progress.emit(60, "Probing CMPA via ISP…")
+        try:
+            result = lpc55_isp.detect_variant()
+        except lpc55_isp.Lpc55Error as exc:
+            self.error_occurred.emit(f"ISP probe failed: {exc}")
+            return
+
+        self.operation_progress.emit(100, "Done")
+        self.operation_completed.emit(True, f"Variant: {result}")
+        self.variant_ready.emit(result)
 
     def wink(self) -> None:
         """Wink device LED."""

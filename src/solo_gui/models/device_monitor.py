@@ -94,6 +94,7 @@ class DeviceMonitor(QObject):
         self._poll_timer.timeout.connect(self._poll_devices)
         self._missing_scans: Dict[str, int] = {}
         self._disconnect_grace_scans = 3 if sys.platform == "win32" else 1
+        self._paused = False
 
     def _update_polling_state(self) -> None:
         """Keep the poll timer running once monitoring is active.
@@ -109,6 +110,17 @@ class DeviceMonitor(QObject):
                 "_update_polling_state starting background polling"
             )
             self._poll_timer.start()
+
+    def pause_monitoring(self) -> None:
+        """Temporarily stop all device discovery (e.g. during ISP check)."""
+        self._paused = True
+        self._poll_timer.stop()
+
+    def resume_monitoring(self) -> None:
+        """Resume device discovery after ISP check completes."""
+        self._paused = False
+        self._scan_devices()
+        self._update_polling_state()
 
     def _poll_devices(self) -> None:
         """Run the appropriate periodic scan for the current connection state."""
@@ -203,6 +215,8 @@ class DeviceMonitor(QObject):
 
     def _on_usb_device_connected(self, device_id: str, bus: int, address: int) -> None:
         """Handle USB device connection."""
+        if self._paused:
+            return
         try:
             # Run a full scan now and again shortly afterwards. Windows can emit
             # the USB arrival event before the new mode is fully discoverable.
@@ -229,6 +243,8 @@ class DeviceMonitor(QObject):
 
     def _scan_devices(self) -> None:
         """Scan for connected SoloKeys devices."""
+        if self._paused:
+            return
         found_regular = list_regular_descriptors()
         found_bootloader = _list_bootloader_descriptors_for_monitor()
         _log.debug("_scan_devices found_regular=%s", [desc.id for desc in found_regular])

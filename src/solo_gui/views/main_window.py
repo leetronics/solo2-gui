@@ -302,8 +302,25 @@ class MainWindow(QMainWindow):
         device_layout = QHBoxLayout()
         device_layout.setContentsMargins(10, 10, 10, 10)
         self._device_label = QLabel("No device connected")
+        self._variant_help_lbl = QLabel()
+        if HAS_QTAWESOME:
+            try:
+                _help_icon = qta.icon('fa5s.question-circle', color='gray')
+                self._variant_help_lbl.setPixmap(_help_icon.pixmap(QSize(14, 14)))
+            except Exception:
+                self._variant_help_lbl.setText("?")
+        else:
+            self._variant_help_lbl.setText("?")
+        self._variant_help_lbl.setToolTip(
+            "The locked/unlocked status is read from the device firmware.\n"
+            "For a definitive hardware-level check use\n"
+            "'Check Variant' in the Admin tab."
+        )
+        self._variant_help_lbl.setVisible(False)
         self._refresh_button = QPushButton("Refresh")
         device_layout.addWidget(self._device_label)
+        device_layout.addSpacing(4)
+        device_layout.addWidget(self._variant_help_lbl)
         device_layout.addWidget(self._refresh_button)
         device_layout.addStretch()
         main_layout.addLayout(device_layout)
@@ -480,6 +497,8 @@ class MainWindow(QMainWindow):
         self._device_monitor.device_error.connect(self._on_device_monitor_error)
         self._refresh_button.clicked.connect(self._refresh_devices)
         self._admin_tab.reconnect_expected.connect(self._begin_expected_reconnect_scan)
+        self._admin_tab.reconnect_prepare.connect(self._prepare_for_reconnect)
+        self._admin_tab.isp_done.connect(self._device_monitor.resume_monitoring)
         self._piv_tab.piv_availability.connect(self._on_piv_availability)
         self._gpg_tab.gpg_availability.connect(self._on_gpg_availability)
         self._vault_tab.vault_available.connect(self._on_vault_availability)
@@ -524,11 +543,19 @@ class MainWindow(QMainWindow):
         if info.mode.value == "regular":
             self._device_manager.start(device)
 
-        product = info.serial_number or "Solo 2"
         in_bootloader = info.mode.value == "bootloader"
         suffix = " (Bootloader)" if in_bootloader else ""
         fw_str = format_firmware_version(info.firmware_version)
-        self._device_label.setText(f"Device: {product}{suffix} — fw {fw_str}")
+
+        variant = getattr(device, "variant", "")
+        if variant == "Hacker":
+            variant_label = " (unlocked)"
+        elif variant == "Secure":
+            variant_label = " (locked)"
+        else:
+            variant_label = f" ({variant})" if variant else ""
+        self._device_label.setText(f"Solo 2{variant_label}{suffix} - fw {fw_str}")
+        self._variant_help_lbl.setVisible(bool(variant) and not in_bootloader)
 
         self._set_tabs_enabled(True)
 
@@ -545,7 +572,7 @@ class MainWindow(QMainWindow):
         self._refresh_timer.stop()
 
         mode_label = "Bootloader" if in_bootloader else "Normal"
-        self._status_bar.showMessage(f"Connected to {product} ({mode_label} mode)")
+        self._status_bar.showMessage(f"Solo 2 connected ({mode_label} mode)")
 
     def _on_device_disconnected(self, path: str) -> None:
         if self._current_device is None:
@@ -554,6 +581,7 @@ class MainWindow(QMainWindow):
         self._pending_restore_tab = None
         self._current_device = None
         self._device_label.setText("No device connected")
+        self._variant_help_lbl.setVisible(False)
         self._set_tabs_enabled(False)
         self._status_bar.showMessage("Device disconnected")
 
@@ -588,6 +616,13 @@ class MainWindow(QMainWindow):
         if self._current_device is not None:
             self._fido2_tab.refresh_state()
         self._status_bar.showMessage("Refreshing devices...")
+
+    def _prepare_for_reconnect(self) -> None:
+        """Tell the device monitor to expect a disconnect, without clearing worker state.
+        Pauses all monitor polling to prevent the ISP check racing with discovery.
+        """
+        self._device_monitor.prepare_for_expected_reconnect()
+        self._device_monitor.pause_monitoring()
 
     def _begin_expected_reconnect_scan(self) -> None:
         if self._current_device is not None:

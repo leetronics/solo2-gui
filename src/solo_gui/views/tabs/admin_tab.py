@@ -81,12 +81,15 @@ class AdminTab(QWidget):
     """Admin tab for Solo2 admin app operations and hacker-variant provisioning."""
 
     reconnect_expected = Signal()
+    reconnect_prepare = Signal()  # prepare monitor + pause polling (ISP check starting)
+    isp_done = Signal()           # ISP check finished — resume monitor polling
 
     def __init__(self):
         super().__init__()
         self._device: Optional[SoloDevice] = None
         self._admin_worker: Optional[AdminWorker] = None
         self._worker_thread: Optional[QThread] = None
+        self._isp_monitoring_paused = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -94,12 +97,28 @@ class AdminTab(QWidget):
 
         # Quick Actions
         quick_group = QGroupBox("Quick Actions")
-        quick_layout = QHBoxLayout(quick_group)
+        quick_layout = QVBoxLayout(quick_group)
+        btn_row = QHBoxLayout()
         self._wink_btn = QPushButton("Wink Device")
         self._wink_btn.setToolTip("Flash the device LED to identify it")
         self._wink_btn.clicked.connect(self._wink_device)
-        quick_layout.addWidget(self._wink_btn)
-        quick_layout.addStretch()
+        btn_row.addWidget(self._wink_btn)
+        self._check_variant_btn = QPushButton("Check Variant")
+        self._check_variant_btn.clicked.connect(self._check_variant)
+        btn_row.addWidget(self._check_variant_btn)
+        btn_row.addStretch()
+        quick_layout.addLayout(btn_row)
+        check_variant_desc = QLabel(
+            "<b>Check Variant</b> gives a definitive answer:<br>"
+            "&#8226; <b>Secure</b> — only signed firmware, permanently<br>"
+            "&#8226; <b>Hacker (locked)</b> — Secure Boot still active, can be disabled<br>"
+            "&#8226; <b>Hacker (unlocked)</b> — custom firmware can be flashed freely<br>"
+            "The device reboots into the bootloader (touch required), "
+            "the bootloader is probed, then the device reconnects automatically."
+        )
+        check_variant_desc.setTextFormat(Qt.RichText)
+        check_variant_desc.setWordWrap(True)
+        quick_layout.addWidget(check_variant_desc)
         layout.addWidget(quick_group)
 
         # Reboot
@@ -212,7 +231,7 @@ class AdminTab(QWidget):
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
         self._setup_worker()
-        caps = device.capabilities
+        caps = getattr(device, "capabilities", None)
         self._apply_capabilities(caps)
         self._status_label.setText("Device connected")
 
@@ -237,6 +256,7 @@ class AdminTab(QWidget):
         self._admin_worker.operation_completed.connect(self._on_operation_completed)
         self._admin_worker.error_occurred.connect(self._on_error)
         self._admin_worker.device_disconnected.connect(self._on_device_disconnected)
+        self._admin_worker.variant_ready.connect(self._on_variant_ready)
         self._worker_thread.start()
 
     def _cleanup_worker(self) -> None:
@@ -249,6 +269,7 @@ class AdminTab(QWidget):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         self._wink_btn.setEnabled(enabled)
+        self._check_variant_btn.setEnabled(enabled)
         self._reboot_regular_btn.setEnabled(enabled)
         self._reboot_bootloader_btn.setEnabled(enabled)
         self._update_factory_reset_controls(enabled)
@@ -256,6 +277,7 @@ class AdminTab(QWidget):
     def _apply_capabilities(self, caps) -> None:
         has_device = caps is not None
         self._wink_btn.setEnabled(has_device)
+        self._check_variant_btn.setEnabled(has_device and caps.has_boot_to_bootloader)
         self._reboot_regular_btn.setEnabled(has_device and caps.has_reboot)
         self._reboot_bootloader_btn.setEnabled(has_device and caps.has_boot_to_bootloader)
         self._update_factory_reset_controls(has_device)
@@ -320,6 +342,26 @@ class AdminTab(QWidget):
     def _wink_device(self) -> None:
         if self._admin_worker:
             self._admin_worker.wink()
+
+    def _check_variant(self) -> None:
+        if not self._admin_worker:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Check Device Variant",
+            "This will reboot the device to bootloader mode, probe the hardware, "
+            "then reboot back to firmware.\n\nThe device will disconnect briefly. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            worker = self._admin_worker
+            variant = getattr(self._device, "variant", "") if self._device else ""
+            if variant != "Hacker":
+                # Reboot to bootloader will happen — pause monitor to avoid race
+                self._isp_monitoring_paused = True
+                self.reconnect_prepare.emit()
+            worker.check_variant()
 
     def _reboot(self, mode: RebootMode) -> None:
         mode_name = "bootloader" if mode == RebootMode.BOOTLOADER else "normal"
@@ -398,3 +440,46 @@ class AdminTab(QWidget):
             "Device Disconnected",
             "The device has disconnected. It may be rebooting or entering a different mode."
         )
+
+    def _on_variant_ready(self, result: str) -> None:
+        if self._isp_monitoring_paused:
+            self.isp_done.emit()  # resume device monitor polling
+            self._isp_monitoring_paused = False
+        from PySide6.QtCore import Qt
+
+        if result == "Secure":
+            title = "Secure"
+            text = (
+                "<b>This is a Secure device.</b><br><br>"
+                "The hardware Secure Boot seal is permanently set by SoloKeys at manufacturing.<br>"
+                "The bootloader blocks all unauthorized memory access.<br>"
+                "Only officially signed firmware images can be installed."
+            )
+        elif result == "Hacker (locked)":
+            title = "Hacker (locked)"
+            text = (
+                "<b>This is a Hacker device with Secure Boot still active.</b><br><br>"
+                "The bootloader allows memory access (confirming it is a Hacker device), "
+                "but Secure Boot is still enforced — unsigned firmware cannot be flashed yet.<br><br>"
+                "To disable Secure Boot and unlock the device:<br>"
+                "<a href='https://hackmd.io/@solokeys/solo2-getting-started#Disabling-Secure-Boot'>"
+                "https://hackmd.io/@solokeys/solo2-getting-started#Disabling-Secure-Boot</a>"
+            )
+        else:  # "Hacker (unlocked)"
+            title = "Hacker (unlocked)"
+            text = (
+                "<b>This is a Hacker device with Secure Boot disabled.</b><br><br>"
+                "Custom firmware can be flashed freely.<br><br>"
+                "Options:<br>"
+                "&#8226; Command line: <tt>lpc55 write-flash &lt;file.bin&gt;</tt><br>"
+                "&#8226; This GUI: use <b>Flash from File</b> in the Overview tab "
+                "(accepts .bin and .sb2 files)"
+            )
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle(f"Variant Check: {title}")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(text)
+        msg.setIcon(QMessageBox.Information)
+        msg.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        msg.exec()
