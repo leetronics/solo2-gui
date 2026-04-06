@@ -360,7 +360,9 @@ class AdminTab(QWidget):
             self,
             "Check Device Variant",
             "This will reboot the device to bootloader mode, probe the hardware, "
-            "then reboot back to firmware.\n\nThe device will disconnect briefly. Continue?",
+            "then reboot back to firmware.\n\n"
+            "Touch the device button when prompted to confirm the reboot.\n\n"
+            "The device will disconnect briefly. Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )

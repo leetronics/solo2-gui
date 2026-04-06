@@ -48,7 +48,7 @@ class OverviewTab(QWidget):
         self._check_variant_btn = QPushButton("Check Variant")
         self._check_variant_btn.setToolTip(
             "Probe the hardware to confirm the device variant and lock state.\n"
-            "The device will reboot to bootloader briefly."
+            "The device will reboot to bootloader mode — touch the button when prompted."
         )
         self._check_variant_btn.clicked.connect(self.check_variant_requested)
         self._check_variant_btn.setEnabled(False)
