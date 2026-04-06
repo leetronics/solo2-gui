@@ -16,8 +16,8 @@ Requires:       python3dist(pyusb)
 Requires:       python3dist(qtawesome)
 Requires:       python3dist(requests)
 Requires:       python3dist(hidapi)
+Requires:       python3dist(pyscard)
 Recommends:     pcsc-lite
-Recommends:     python3dist(pyscard)
 
 %description
 Manage your Solo 2 device, FIDO2 resident credentials, Secrets/TOTP entries,
