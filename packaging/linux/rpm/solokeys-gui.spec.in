@@ -15,6 +15,7 @@ Requires:       python3dist(pyside6)
 Requires:       python3dist(pyusb)
 Requires:       python3dist(qtawesome)
 Requires:       python3dist(requests)
+Requires:       python3dist(hidapi)
 Recommends:     pcsc-lite
 Recommends:     python3dist(pyscard)
 
