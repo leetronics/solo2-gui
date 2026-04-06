@@ -83,6 +83,7 @@ class AdminTab(QWidget):
     reconnect_expected = Signal()
     reconnect_prepare = Signal()  # prepare monitor + pause polling (ISP check starting)
     isp_done = Signal()           # ISP check finished — resume monitor polling
+    variant_detected = Signal(str)  # forwarded to overview tab
 
     def __init__(self):
         super().__init__()
@@ -104,31 +105,26 @@ class AdminTab(QWidget):
         self._wink_btn.setToolTip("Flash the device LED to identify it")
         self._wink_btn.clicked.connect(self._wink_device)
         btn_row.addWidget(self._wink_btn)
-        self._check_variant_btn = QPushButton("Check Variant")
-        self._check_variant_btn.clicked.connect(self._check_variant)
-        btn_row.addWidget(self._check_variant_btn)
         self._unlock_btn = QPushButton("Unlock Device")
         self._unlock_btn.setToolTip(
             "Disable Secure Boot (Hacker devices only).\n"
-            "Run 'Check Variant' first — button enables if device is Hacker (locked)."
+            "Run 'Check Variant' from the Overview tab first — "
+            "button enables if device is Hacker (locked)."
         )
         self._unlock_btn.clicked.connect(self._unlock_device)
         self._unlock_btn.setEnabled(False)
         btn_row.addWidget(self._unlock_btn)
         btn_row.addStretch()
         quick_layout.addLayout(btn_row)
-        check_variant_desc = QLabel(
-            "<b>Check Variant</b> gives a definitive answer:<br>"
-            "&#8226; <b>Secure</b> — only signed firmware, permanently<br>"
-            "&#8226; <b>Hacker (locked)</b> — Secure Boot still active; "
-            "<b>Unlock Device</b> will then become available<br>"
-            "&#8226; <b>Hacker (unlocked)</b> — custom firmware can be flashed freely<br>"
-            "The device reboots into the bootloader (touch required), "
-            "the bootloader is probed, then the device reconnects automatically."
+        unlock_desc = QLabel(
+            "<b>Unlock Device</b> disables Secure Boot on Hacker devices, "
+            "allowing custom firmware to be flashed freely.<br>"
+            "Use <b>Check Variant</b> in the Overview tab first to confirm the device type. "
+            "The Unlock button becomes available once the device is confirmed as Hacker (locked)."
         )
-        check_variant_desc.setTextFormat(Qt.RichText)
-        check_variant_desc.setWordWrap(True)
-        quick_layout.addWidget(check_variant_desc)
+        unlock_desc.setTextFormat(Qt.RichText)
+        unlock_desc.setWordWrap(True)
+        quick_layout.addWidget(unlock_desc)
         layout.addWidget(quick_group)
 
         # Reboot
@@ -281,7 +277,6 @@ class AdminTab(QWidget):
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         self._wink_btn.setEnabled(enabled)
-        self._check_variant_btn.setEnabled(enabled)
         self._unlock_btn.setEnabled(enabled and self._last_isp_variant == "Hacker (locked)")
         self._reboot_regular_btn.setEnabled(enabled)
         self._reboot_bootloader_btn.setEnabled(enabled)
@@ -291,7 +286,6 @@ class AdminTab(QWidget):
         has_device = caps is not None
         can_boot = has_device and caps.has_boot_to_bootloader
         self._wink_btn.setEnabled(has_device)
-        self._check_variant_btn.setEnabled(can_boot)
         self._unlock_btn.setEnabled(can_boot and self._last_isp_variant == "Hacker (locked)")
         self._reboot_regular_btn.setEnabled(has_device and caps.has_reboot)
         self._reboot_bootloader_btn.setEnabled(can_boot)
@@ -358,7 +352,8 @@ class AdminTab(QWidget):
         if self._admin_worker:
             self._admin_worker.wink()
 
-    def _check_variant(self) -> None:
+    def trigger_check_variant(self) -> None:
+        """Public entry point — called from overview tab via main_window."""
         if not self._admin_worker:
             return
         reply = QMessageBox.question(
@@ -373,7 +368,6 @@ class AdminTab(QWidget):
             worker = self._admin_worker
             variant = getattr(self._device, "variant", "") if self._device else ""
             if variant != "Hacker":
-                # Reboot to bootloader will happen — pause monitor to avoid race
                 self._isp_monitoring_paused = True
                 self.reconnect_prepare.emit()
             worker.check_variant()
@@ -482,6 +476,7 @@ class AdminTab(QWidget):
 
         self._last_isp_variant = result
         self._unlock_btn.setEnabled(result == "Hacker (locked)")
+        self.variant_detected.emit(result)
 
         if result == "Secure":
             title = "Secure"

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QGridLayout, QPushButton,
     QProgressBar, QMessageBox, QLineEdit, QFileDialog
 )
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, Signal
 
 from solo_gui.models.device import SoloDevice, DeviceInfo, format_firmware_full
 from solo_gui.workers.firmware_worker import FirmwareUpdateWorker, FirmwareInfo
@@ -16,12 +16,15 @@ from solo_gui.workers.firmware_worker import FirmwareUpdateWorker, FirmwareInfo
 class OverviewTab(QWidget):
     """Overview tab showing device status and firmware update."""
 
+    check_variant_requested = Signal()
+
     def __init__(self):
         super().__init__()
         self._device: Optional[SoloDevice] = None
         self._firmware_worker: Optional[FirmwareUpdateWorker] = None
         self._firmware_thread: Optional[QThread] = None
         self._firmware_info: Optional[FirmwareInfo] = None
+        self._isp_variant: Optional[str] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -29,16 +32,29 @@ class OverviewTab(QWidget):
 
         # Device Information
         info_group = QGroupBox("Device Information")
-        info_layout = QGridLayout(info_group)
+        info_vbox = QVBoxLayout(info_group)
 
+        info_grid = QGridLayout()
         self._device_type_label = QLabel("Not connected")
         self._firmware_label = QLabel("-")
+        info_grid.addWidget(QLabel("Device:"), 0, 0)
+        info_grid.addWidget(self._device_type_label, 0, 1)
+        info_grid.addWidget(QLabel("Firmware:"), 1, 0)
+        info_grid.addWidget(self._firmware_label, 1, 1)
+        info_grid.setColumnStretch(1, 1)
+        info_vbox.addLayout(info_grid)
 
-        info_layout.addWidget(QLabel("Device:"), 0, 0)
-        info_layout.addWidget(self._device_type_label, 0, 1)
-        info_layout.addWidget(QLabel("Firmware:"), 1, 0)
-        info_layout.addWidget(self._firmware_label, 1, 1)
-        info_layout.setColumnStretch(1, 1)
+        check_row = QHBoxLayout()
+        self._check_variant_btn = QPushButton("Check Variant")
+        self._check_variant_btn.setToolTip(
+            "Probe the hardware to confirm the device variant and lock state.\n"
+            "The device will reboot to bootloader briefly."
+        )
+        self._check_variant_btn.clicked.connect(self.check_variant_requested)
+        self._check_variant_btn.setEnabled(False)
+        check_row.addWidget(self._check_variant_btn)
+        check_row.addStretch()
+        info_vbox.addLayout(check_row)
 
         # Firmware Update
         firmware_group = QGroupBox("Firmware Update")
@@ -95,20 +111,29 @@ class OverviewTab(QWidget):
 
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
+        self._isp_variant = None
         self._firmware_info = None
         self._setup_firmware_worker()
         self._update_device_info()
         self._check_updates_button.setEnabled(True)
+        self._check_variant_btn.setEnabled(True)
         self._update_flash_file_visibility()
 
     def clear_device(self) -> None:
         self._device = None
+        self._isp_variant = None
         self._firmware_info = None
         self._cleanup_firmware_worker()
         self._clear_device_info()
         self._check_updates_button.setEnabled(False)
+        self._check_variant_btn.setEnabled(False)
         self._flash_file_btn.setEnabled(False)
         self._flash_group.setVisible(False)
+
+    def on_variant_detected(self, result: str) -> None:
+        """Receive ISP variant result from admin_tab and refresh device info."""
+        self._isp_variant = result
+        self._update_device_info()
 
     def _setup_firmware_worker(self) -> None:
         self._cleanup_firmware_worker()
@@ -136,7 +161,21 @@ class OverviewTab(QWidget):
             self._clear_device_info()
             return
         info = self._device.get_info()
-        self._device_type_label.setText(info.serial_number or "SoloKeys Solo 2")
+        if self._isp_variant == "Hacker (unlocked)":
+            variant_label = " (unlocked)"
+        elif self._isp_variant == "Hacker (locked)":
+            variant_label = " (locked)"
+        elif self._isp_variant == "Secure":
+            variant_label = " (Secure)"
+        else:
+            fw = getattr(self._device, "variant", "")
+            if fw == "Hacker":
+                variant_label = " (unlocked)"
+            elif fw == "Secure":
+                variant_label = " (locked)"
+            else:
+                variant_label = f" ({fw})" if fw else ""
+        self._device_type_label.setText(f"Solo 2{variant_label}")
         self._firmware_label.setText(format_firmware_full(info.firmware_version))
         self._update_flash_file_visibility()
 
