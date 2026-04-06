@@ -314,7 +314,7 @@ class MainWindow(QMainWindow):
         self._variant_help_lbl.setToolTip(
             "The locked/unlocked status is read from the device firmware.\n"
             "For a definitive hardware-level check use\n"
-            "'Check Variant' in the Admin tab."
+            "'Check Variant' in the Overview tab."
         )
         self._variant_help_lbl.setVisible(False)
         self._refresh_button = QPushButton("Refresh")

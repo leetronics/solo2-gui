@@ -356,6 +356,11 @@ class AdminTab(QWidget):
         """Public entry point — called from overview tab via main_window."""
         if not self._admin_worker:
             return
+        variant = getattr(self._device, "variant", "") if self._device else ""
+        if variant == "Hacker":
+            # Fast path: no reboot needed, skip the confirmation dialog.
+            self._admin_worker.check_variant()
+            return
         reply = QMessageBox.question(
             self,
             "Check Device Variant",
@@ -367,12 +372,9 @@ class AdminTab(QWidget):
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            worker = self._admin_worker
-            variant = getattr(self._device, "variant", "") if self._device else ""
-            if variant != "Hacker":
-                self._isp_monitoring_paused = True
-                self.reconnect_prepare.emit()
-            worker.check_variant()
+            self._isp_monitoring_paused = True
+            self.reconnect_prepare.emit()
+            self._admin_worker.check_variant()
 
     def _unlock_device(self) -> None:
         if not self._admin_worker:
