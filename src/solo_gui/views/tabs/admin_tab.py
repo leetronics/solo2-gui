@@ -406,8 +406,9 @@ class AdminTab(QWidget):
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes and self._admin_worker:
+            worker = self._admin_worker
             self.reconnect_expected.emit()
-            self._admin_worker.reboot(mode)
+            worker.reboot(mode)
 
     def _factory_reset(self) -> None:
         if not self._factory_reset_btn.isEnabled():
