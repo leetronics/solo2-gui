@@ -32,6 +32,7 @@ class AdminWorker(QObject):
     reboot_requested = Signal(int)
     device_disconnected = Signal()
     variant_ready = Signal(str)
+    unlock_ready = Signal()
 
     def __init__(self, device):
         super().__init__()
@@ -210,6 +211,39 @@ class AdminWorker(QObject):
         self.operation_progress.emit(100, "Done")
         self.operation_completed.emit(True, f"Variant: {result}")
         self.variant_ready.emit(result)
+
+    def unlock_device(self) -> None:
+        """
+        Disable Secure Boot on a Hacker (locked) device via MCUBOOT ISP.
+
+        Reboots to bootloader, zeroes the CMPA SHA256 digest field (which
+        disables Secure Boot on LPC55), then reboots back to firmware.
+        """
+        self.operation_started.emit("Disabling Secure Boot…")
+
+        try:
+            AdminSession(self._device).reboot(RebootMode.BOOTLOADER)
+        except Exception as exc:
+            _log.debug("unlock_device: reboot-to-bootloader raised (expected): %s", exc)
+
+        self.operation_progress.emit(25, "Waiting for bootloader…")
+        if not lpc55_isp.wait_for_bootloader(timeout_s=10.0):
+            self.error_occurred.emit(
+                "Bootloader device did not appear within 10 s.\n"
+                "Make sure the device is connected and try again."
+            )
+            return
+
+        self.operation_progress.emit(60, "Writing PFR settings…")
+        try:
+            lpc55_isp.disable_secure_boot()
+        except lpc55_isp.Lpc55Error as exc:
+            self.error_occurred.emit(f"Unlock failed: {exc}")
+            return
+
+        self.operation_progress.emit(100, "Done")
+        self.operation_completed.emit(True, "Secure Boot disabled — device is now unlocked")
+        self.unlock_ready.emit()
 
     def wink(self) -> None:
         """Wink device LED."""
