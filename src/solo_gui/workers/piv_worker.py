@@ -41,6 +41,14 @@ class PivKeyType(Enum):
     ECC_P384 = "eccp384"
 
 
+class PivTouchPolicy(Enum):
+    """PIV touch policies for generated keys."""
+
+    NEVER = "never"
+    ALWAYS = "always"
+    CACHED = "cached"
+
+
 class PivSlot(Enum):
     """PIV key slots.
 
@@ -88,6 +96,12 @@ ALGORITHM_ID = {
     PivKeyType.RSA_2048: 0x07,
     PivKeyType.ECC_P256: 0x11,
     PivKeyType.ECC_P384: 0x14,
+}
+
+TOUCH_POLICY_ID = {
+    PivTouchPolicy.NEVER: 0x01,
+    PivTouchPolicy.ALWAYS: 0x02,
+    PivTouchPolicy.CACHED: 0x03,
 }
 
 
@@ -149,6 +163,7 @@ class PivWorker(QObject):
     certificate_exported = Signal(bool, str, bytes)  # success, error/path, cert data
     pin_changed = Signal(bool, str)  # success, error message
     pin_status_updated = Signal(dict)  # status info
+    key_probe_completed = Signal(bool, str)  # success, status message
     reset_completed = Signal(bool, str)  # success, message
     pcsc_status = Signal(bool, str)  # available, message
     error_occurred = Signal(str)  # error message
@@ -159,7 +174,15 @@ class PivWorker(QObject):
         self._device = device
         self._connection = None
         self._selected = False
-        self._key_cache = {}  # Cache of slots with keys (since PIV doesn't persist metadata)
+        self._key_cache = {}  # Session-local key hints after generate/import operations
+
+    def get_key_cache(self) -> Dict[PivSlot, dict]:
+        """Return a shallow copy of the session-local key cache."""
+        return {slot: dict(info) for slot, info in self._key_cache.items()}
+
+    def set_key_cache(self, cache: Dict[PivSlot, dict]) -> None:
+        """Restore a previously captured session-local key cache."""
+        self._key_cache = {slot: dict(info) for slot, info in (cache or {}).items()}
 
     def check_pcsc_available(self) -> bool:
         """Check if PCSC is available and emit status."""
@@ -364,6 +387,10 @@ class PivWorker(QObject):
         response, sw1, sw2 = self._connection.transmit(apdu)
         return response, sw1, sw2
 
+    def _encode_tlv(self, tag: int, value: List[int]) -> List[int]:
+        """Encode a simple one-byte-tag TLV."""
+        return [tag] + self._encode_length(len(value)) + value
+
     def _get_data(self, tag: List[int]) -> Optional[bytes]:
         """Get data object from PIV applet.
 
@@ -399,20 +426,162 @@ class PivWorker(QObject):
             return None  # Data not found
         return None
 
-    def _slot_has_key(self, slot: PivSlot) -> bool:
-        """Return True when GET METADATA reports a private key in the slot."""
+    def _transmit_with_get_response(self, apdu: List[int]) -> Tuple[bytes, int, int]:
+        """Send an APDU and collect any follow-up GET RESPONSE data."""
         if not self._connection:
-            return False
+            raise Exception("Not connected")
+
+        response, sw1, sw2 = self._connection.transmit(apdu)
+        data = bytearray(response)
+        while sw1 == 0x61:
+            remaining = sw2 if sw2 != 0x00 else 256
+            response, sw1, sw2 = self._connection.transmit([0x00, 0xC0, 0x00, 0x00, remaining])
+            data.extend(response)
+        return bytes(data), sw1, sw2
+
+    def _parse_simple_tlvs(self, data: bytes) -> Dict[int, bytes]:
+        """Parse a flat one-byte-tag TLV sequence."""
+        tlvs: Dict[int, bytes] = {}
+        offset = 0
+        while offset + 2 <= len(data):
+            tag = data[offset]
+            offset += 1
+            first_len = data[offset]
+            offset += 1
+            if first_len & 0x80:
+                len_len = first_len & 0x7F
+                if offset + len_len > len(data):
+                    break
+                length = int.from_bytes(data[offset : offset + len_len], "big")
+                offset += len_len
+            else:
+                length = first_len
+            if offset + length > len(data):
+                break
+            tlvs[tag] = data[offset : offset + length]
+            offset += length
+        return tlvs
+
+    def _key_type_from_metadata(self, metadata: bytes) -> Optional[str]:
+        """Extract a human-readable key type from GET METADATA data."""
+        try:
+            tlvs = self._parse_simple_tlvs(metadata)
+            algorithm = tlvs.get(0x01, b"")
+            if not algorithm:
+                return None
+            alg_id = algorithm[0]
+            return {
+                ALGORITHM_ID[PivKeyType.RSA_2048]: _KEY_TYPE_LABELS[PivKeyType.RSA_2048],
+                ALGORITHM_ID[PivKeyType.ECC_P256]: _KEY_TYPE_LABELS[PivKeyType.ECC_P256],
+                ALGORITHM_ID[PivKeyType.ECC_P384]: _KEY_TYPE_LABELS[PivKeyType.ECC_P384],
+            }.get(alg_id)
+        except Exception:
+            return None
+
+    def _get_slot_metadata(self, slot: PivSlot) -> Tuple[bool, Optional[str]]:
+        """Return whether the slot exposes real metadata and, if known, its key type."""
+        if not self._connection:
+            return False, None
 
         key_ref = KEY_REFERENCE.get(slot)
         if not key_ref:
-            return False
+            return False, None
 
         try:
-            _response, sw1, sw2 = self._connection.transmit([0x00, 0xF7, 0x00, key_ref, 0x00])
-            return sw1 == 0x90 or sw1 == 0x61
+            response, sw1, sw2 = self._transmit_with_get_response([0x00, 0xF7, 0x00, key_ref, 0x00])
+            if sw1 != 0x90 or sw2 != 0x00:
+                return False, None
+            # On this firmware, empty slots can still return SW=9000 with an empty body.
+            # Only treat the slot as populated when metadata TLVs are actually present.
+            if not response:
+                return False, None
+
+            tlvs = self._parse_simple_tlvs(response)
+            if not tlvs:
+                return False, None
+
+            # Some firmware builds return a bare policy TLV (0x02) even for empty slots.
+            # Treat the slot as populated only when we see algorithm/origin/public-key data.
+            has_real_metadata = any(tag in tlvs for tag in (0x01, 0x03, 0x04))
+            if not has_real_metadata:
+                return False, None
+
+            return True, self._key_type_from_metadata(response)
         except Exception:
-            return False
+            return False, None
+
+    def _slot_has_key(self, slot: PivSlot) -> bool:
+        """Return True when GET METADATA exposes actual key metadata in the slot."""
+        has_key, _key_type = self._get_slot_metadata(slot)
+        return has_key
+
+    def _build_sign_probe_data(self, key_type: PivKeyType) -> List[int]:
+        """Build a GENERAL AUTHENTICATE sign probe for the requested key type."""
+        if key_type == PivKeyType.ECC_P256:
+            digest = list(bytes(range(1, 33)))
+        elif key_type == PivKeyType.ECC_P384:
+            digest = list(bytes(range(1, 49)))
+        elif key_type == PivKeyType.RSA_2048:
+            digest_info_prefix = bytes.fromhex("3031300d060960864801650304020105000420")
+            digest = bytes(range(1, 33))
+            digest_block = digest_info_prefix + digest
+            padding_len = 256 - 3 - len(digest_block)
+            digest = [0x00, 0x01] + ([0xFF] * padding_len) + [0x00] + list(digest_block)
+        else:
+            raise ValueError(f"Unsupported probe key type: {key_type}")
+
+        auth_template = self._encode_tlv(0x82, []) + self._encode_tlv(0x81, digest)
+        return self._encode_tlv(0x7C, auth_template)
+
+    def _probe_slot_with_verified_pin(self, slot: PivSlot) -> Optional[PivKeyType]:
+        """Try to prove key presence in a slot after PIN verification."""
+        key_ref = KEY_REFERENCE.get(slot)
+        if not key_ref:
+            return None
+
+        for key_type in (PivKeyType.ECC_P256, PivKeyType.ECC_P384, PivKeyType.RSA_2048):
+            try:
+                response, sw1, sw2 = self._send_apdu(
+                    INS_AUTHENTICATE,
+                    ALGORITHM_ID[key_type],
+                    key_ref,
+                    self._build_sign_probe_data(key_type),
+                )
+            except Exception:
+                continue
+
+            # 9000 / 61xx = operation succeeded. 6985 often means touch policy blocked
+            # completion, which still proves the slot contains a usable private key.
+            if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61 or (sw1 == 0x69 and sw2 == 0x85):
+                return key_type
+
+        return None
+
+    def _collect_slot_infos(self) -> List[SlotInfo]:
+        """Collect combined slot state using the current connection."""
+        result = []
+        for slot in PivSlot:
+            cert = None
+            tag = TAG_CERTIFICATE.get(slot)
+            if tag:
+                raw = self._get_data(tag)
+                if raw:
+                    cert = self._parse_certificate(raw, slot)
+
+            cached = self._key_cache.get(slot)
+            metadata_key, metadata_key_type = self._get_slot_metadata(slot)
+            has_key = bool(metadata_key or cert is not None or cached is not None)
+
+            key_type_str = None
+            if cached:
+                key_type_str = cached.get("algorithm")
+            elif metadata_key_type:
+                key_type_str = metadata_key_type
+            elif cert:
+                key_type_str = self._detect_key_type_from_cert(cert.certificate_der)
+
+            result.append(SlotInfo(slot, has_key, key_type_str, cert))
+        return result
 
     def _parse_certificate(self, data: bytes, slot: PivSlot) -> Optional[PivCertificate]:
         """Parse a PIV certificate from raw data."""
@@ -557,30 +726,24 @@ class PivWorker(QObject):
 
                 print(f"[PIV] Checking slot {slot.name} ({key_ref:02X})...")
 
-                # Try YubiKey GetMetadata: 00 F7 00 <key_ref> 00
                 try:
-                    response, sw1, sw2 = self._connection.transmit(
-                        [0x00, 0xF7, 0x00, key_ref, 0x00]
-                    )
-                    
-                    if sw1 == 0x90 or sw1 == 0x61:
+                    has_key, key_type_str = self._get_slot_metadata(slot)
+
+                    if has_key:
                         print(f"[PIV]   ✓ Key exists")
                         
-                        # Check for certificate
                         tag = TAG_CERTIFICATE.get(slot)
                         cert_data = self._get_data(tag) if tag else None
                         
                         key = PivKey(
                             slot=slot,
-                            key_type=None,  # Would need to parse metadata
-                            algorithm="Unknown",
+                            key_type=None,
+                            algorithm=key_type_str or "Unknown",
                             has_certificate=cert_data is not None,
                         )
                         keys.append(key)
-                    elif sw1 == 0x6A and sw2 == 0x82:
-                        print(f"[PIV]   Empty")
                     else:
-                        print(f"[PIV]   Other: {sw1:02X}{sw2:02X}")
+                        print(f"[PIV]   Empty")
                         
                 except Exception as e:
                     print(f"[PIV]   Error: {e}")
@@ -640,7 +803,32 @@ class PivWorker(QObject):
             self.slots_loaded.emit(empty)
             return
         try:
-            result = []
+            self.slots_loaded.emit(self._collect_slot_infos())
+        except Exception as e:
+            self.error_occurred.emit(f"Failed to load slots: {e}")
+            self.slots_loaded.emit(empty)
+        finally:
+            self._disconnect()
+
+    def probe_slots_with_pin(self, pin: str) -> None:
+        """Verify the PIN once and actively probe slots that do not expose metadata."""
+        empty = [SlotInfo(s, False, None, None) for s in PivSlot]
+
+        if not self.check_pcsc_available():
+            self.key_probe_completed.emit(False, "PCSC not available")
+            return
+        if not self._connect():
+            self.key_probe_completed.emit(False, "Failed to connect to device")
+            self.slots_loaded.emit(empty)
+            return
+
+        try:
+            pin_ok, pin_message = self._verify_pin_with_status(pin)
+            if not pin_ok:
+                self.key_probe_completed.emit(False, pin_message or "PIN verification failed")
+                return
+
+            discovered = 0
             for slot in PivSlot:
                 cert = None
                 tag = TAG_CERTIFICATE.get(slot)
@@ -648,23 +836,43 @@ class PivWorker(QObject):
                     raw = self._get_data(tag)
                     if raw:
                         cert = self._parse_certificate(raw, slot)
+                metadata_key, metadata_key_type = self._get_slot_metadata(slot)
+                if metadata_key or cert is not None:
+                    if metadata_key and metadata_key_type:
+                        self._key_cache[slot] = {
+                            "key_type": None,
+                            "algorithm": metadata_key_type,
+                            "has_certificate": cert is not None,
+                        }
+                    continue
 
-                cached = self._key_cache.get(slot)
-                metadata_key = self._slot_has_key(slot)
-                has_key = bool(metadata_key or cert is not None or cached is not None)
+                detected_key_type = self._probe_slot_with_verified_pin(slot)
+                if detected_key_type is None:
+                    continue
 
-                key_type_str = None
-                if cached:
-                    key_type_str = cached.get('algorithm')
-                elif cert:
-                    key_type_str = self._detect_key_type_from_cert(cert.certificate_der)
+                discovered += 1
+                self._key_cache[slot] = {
+                    "key_type": detected_key_type,
+                    "algorithm": _KEY_TYPE_LABELS.get(detected_key_type, detected_key_type.value),
+                    "has_certificate": False,
+                }
 
-                result.append(SlotInfo(slot, has_key, key_type_str, cert))
-
-            self.slots_loaded.emit(result)
+            self.slots_loaded.emit(self._collect_slot_infos())
+            if discovered:
+                noun = "slot" if discovered == 1 else "slots"
+                self.key_probe_completed.emit(
+                    True,
+                    f"PIN verified. Detected additional private keys in {discovered} {noun}.",
+                )
+            else:
+                self.key_probe_completed.emit(
+                    True,
+                    "PIN verified. No additional hidden PIV keys were detected.",
+                )
         except Exception as e:
-            self.error_occurred.emit(f"Failed to load slots: {e}")
+            self.error_occurred.emit(f"Failed to probe slots with PIN: {e}")
             self.slots_loaded.emit(empty)
+            self.key_probe_completed.emit(False, str(e))
         finally:
             self._disconnect()
 
@@ -693,6 +901,7 @@ class PivWorker(QObject):
         key_type: PivKeyType,
         pin: Optional[str] = None,
         mgmt_key: str = DEFAULT_MANAGEMENT_KEY,
+        touch_policy: Optional[PivTouchPolicy] = None,
     ) -> None:
         """Generate a new PIV key in the specified slot."""
         if not self.check_pcsc_available():
@@ -722,7 +931,10 @@ class PivWorker(QObject):
                 self.key_generated.emit(False, "Invalid slot or key type", b"", None)
                 return
 
-            template = [0xAC, 0x03, 0x80, 0x01, alg_id]
+            template_body = [0x80, 0x01, alg_id]
+            if touch_policy is not None:
+                template_body.extend([0xAB, 0x01, TOUCH_POLICY_ID[touch_policy]])
+            template = [0xAC] + self._encode_length(len(template_body)) + template_body
 
             response, sw1, sw2 = self._send_apdu(
                 INS_GENERATE_ASYMMETRIC, 0x00, key_ref, template, 0x00
@@ -896,13 +1108,24 @@ class PivWorker(QObject):
 
     def _verify_pin(self, pin: str) -> bool:
         """Verify the PIV PIN."""
+        success, _message = self._verify_pin_with_status(pin)
+        return success
+
+    def _verify_pin_with_status(self, pin: str) -> Tuple[bool, str]:
+        """Verify the PIV PIN and return a user-facing status message on failure."""
         pin_bytes = pin.encode("utf-8")
         # Pad to 8 bytes with 0xFF
         pin_data = list(pin_bytes) + [0xFF] * (8 - len(pin_bytes))
 
         response, sw1, sw2 = self._send_apdu(INS_VERIFY, 0x00, 0x80, pin_data)
-
-        return sw1 == 0x90 and sw2 == 0x00
+        if sw1 == 0x90 and sw2 == 0x00:
+            return True, ""
+        if sw1 == 0x63 and (sw2 & 0xF0) == 0xC0:
+            retries = sw2 & 0x0F
+            return False, f"Incorrect PIN ({retries} retries remaining)"
+        if sw1 == 0x69 and sw2 == 0x83:
+            return False, "PIN is blocked"
+        return False, f"PIN verification failed: SW={sw1:02X}{sw2:02X}"
 
     def _authenticate_management_key(self, mgmt_key_hex: str) -> bool:
         """Authenticate with the PIV management key (3DES challenge-response).

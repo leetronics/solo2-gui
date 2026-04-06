@@ -137,6 +137,7 @@ from solo_gui.workers.piv_worker import (
     PivCertificate,
     PivSlot,
     PivKeyType,
+    PivTouchPolicy,
     SlotInfo,
     PCSC_AVAILABLE,
     DEFAULT_MANAGEMENT_KEY,
@@ -272,6 +273,12 @@ class GenerateKeyDialog(QDialog):
         self._algo_combo.addItem("ECC P-384", PivKeyType.ECC_P384)
         form_layout.addRow("Algorithm:", self._algo_combo)
 
+        self._touch_policy_combo = QComboBox()
+        self._touch_policy_combo.addItem("Never (Default)", PivTouchPolicy.NEVER)
+        self._touch_policy_combo.addItem("Always", PivTouchPolicy.ALWAYS)
+        self._touch_policy_combo.addItem("Cached (15s)", PivTouchPolicy.CACHED)
+        form_layout.addRow("Touch Policy:", self._touch_policy_combo)
+
         # PIN input
         self._pin_input = QLineEdit()
         self._pin_input.setEchoMode(QLineEdit.Password)
@@ -316,6 +323,9 @@ class GenerateKeyDialog(QDialog):
 
     def get_mgmt_key(self) -> str:
         return self._mgmt_key_input.text()
+
+    def get_touch_policy(self) -> PivTouchPolicy:
+        return self._touch_policy_combo.currentData()
 
 
 class SlotCard(QFrame):
@@ -366,6 +376,11 @@ class SlotCard(QFrame):
         name_label = QLabel(name)
         name_label.setStyleSheet("font-weight: bold; font-size: 11pt;")
 
+        self._status_label = QLabel("- empty")
+        self._status_label.setStyleSheet(
+            f"color: {colors['secondary_text']}; font-size: 10pt;"
+        )
+
         self._btn_generate = QPushButton("Generate Key")
         self._btn_generate.setToolTip("Generate a new key pair")
         self._btn_generate.clicked.connect(lambda: self.generate_requested.emit(self._slot))
@@ -391,35 +406,27 @@ class SlotCard(QFrame):
 
         row1.addWidget(badge)
         row1.addWidget(name_label)
+        row1.addWidget(self._status_label)
         row1.addStretch()
         row1.addWidget(self._btn_generate)
         row1.addWidget(self._btn_import)
         row1.addWidget(self._btn_export)
         row1.addWidget(self._btn_delete)
 
-        # --- Row 2: status ---
         row2 = QHBoxLayout()
         row2.setSpacing(6)
-        row2.addSpacing(42)  # indent past badge
-
-        self._status_label = QLabel("No key")
-        self._status_label.setStyleSheet("color: gray; font-size: 10pt;")
-        row2.addWidget(self._status_label)
-        row2.addStretch()
-
-        row3 = QHBoxLayout()
-        row3.setSpacing(6)
-        row3.addSpacing(42)
+        row2.addSpacing(42)
 
         self._hint_label = QLabel("Generate a new device-resident key in this slot.")
         self._hint_label.setWordWrap(True)
-        self._hint_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 9pt;")
-        row3.addWidget(self._hint_label)
-        row3.addStretch()
+        self._hint_label.setStyleSheet(
+            f"color: {colors['secondary_text']}; font-size: 9pt;"
+        )
+        row2.addWidget(self._hint_label)
+        row2.addStretch()
 
         outer.addLayout(row1)
         outer.addLayout(row2)
-        outer.addLayout(row3)
         self._apply_action_styles()
 
     def _button_style(self, primary: bool) -> str:
@@ -483,14 +490,18 @@ class SlotCard(QFrame):
         self._apply_action_styles()
 
         if not has_key and not has_cert:
-            self._status_label.setText("No key")
+            self._status_label.setText("- empty")
             self._status_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 10pt;")
-            self._hint_label.setText("Generate a new device-resident key in this slot.")
+            self._status_label.setToolTip("Generate a new device-resident key in this slot.")
+            self._hint_label.setText("Generate a key here, or use Verify PIN to Probe Keys if you expect one already exists.")
             self._hint_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 9pt;")
         elif has_key and not has_cert:
             kt = key_type or "Key"
-            self._status_label.setText(f"{kt} present — certificate missing")
+            self._status_label.setText(f"- {kt} present, cert missing")
             self._status_label.setStyleSheet("color: #b26a00; font-size: 10pt;")
+            self._status_label.setToolTip(
+                "Private key present. Next step: import the issued certificate for this slot."
+            )
             self._hint_label.setText("Next step: import the issued certificate for this key.")
             self._hint_label.setStyleSheet("color: #b26a00; font-size: 9pt;")
         else:
@@ -499,15 +510,18 @@ class SlotCard(QFrame):
             expiry = self._format_expiry(cert.not_after) if cert else ""
             kt = key_type or ""
             if kt and subject_short:
-                text = f"{kt} · {subject_short}"
+                text = f"- {kt} - {subject_short}"
             elif subject_short:
-                text = subject_short
+                text = f"- {subject_short}"
             else:
-                text = kt or "Certificate present"
+                text = f"- {kt}" if kt else "- cert present"
             if expiry:
-                text += f"  (expires {expiry})"
+                text += f" - exp {expiry}"
             self._status_label.setText(text)
             self._status_label.setStyleSheet(f"color: {colors['text']}; font-size: 10pt;")
+            self._status_label.setToolTip(
+                f"{cert.subject}\nExpires: {expiry}" if cert and expiry else cert.subject if cert else "Ready for PIV use."
+            )
             self._hint_label.setText("Ready for PIV use.")
             self._hint_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 9pt;")
 
@@ -549,6 +563,7 @@ class PivTab(QWidget):
         self._slot_infos: Dict[PivSlot, SlotInfo] = {
             slot: SlotInfo(slot, False, None, None) for slot in PivSlot
         }
+        self._session_key_cache_by_device: Dict[str, Dict[PivSlot, dict]] = {}
         self._last_generated_key_type: Optional[PivKeyType] = None
         self._controls_available = False
         self._reset_ready = False
@@ -644,6 +659,22 @@ class PivTab(QWidget):
         reset_hint.setWordWrap(True)
         reset_hint.setStyleSheet("color: gray; font-size: 10px;")
         pin_main.addWidget(reset_hint)
+
+        probe_hint = QLabel(
+            "If a slot still looks empty after reconnect, you can verify the PIN once to actively probe hidden keys. "
+            "If a slot uses touch policy, touch the key during probing."
+        )
+        probe_hint.setWordWrap(True)
+        probe_hint.setStyleSheet("color: gray; font-size: 10px;")
+        pin_main.addWidget(probe_hint)
+
+        self._probe_keys_button = QPushButton("Verify PIN to Probe Keys")
+        self._probe_keys_button.setToolTip(
+            "Use your PIN once to probe slots that do not expose reliable metadata after reconnect. "
+            "Some slots may also require touch."
+        )
+        self._probe_keys_button.clicked.connect(self._probe_keys_with_pin)
+        pin_main.addWidget(self._probe_keys_button)
 
         # Danger zone sub-group
         danger_colors = _get_danger_zone_colors()
@@ -741,6 +772,7 @@ class PivTab(QWidget):
 
     def clear_device(self) -> None:
         """Clear the current device and reset all slot cards."""
+        self._store_worker_key_cache()
         self._device = None
         self._cleanup_worker()
         self._slot_infos = {slot: SlotInfo(slot, False, None, None) for slot in PivSlot}
@@ -770,10 +802,13 @@ class PivTab(QWidget):
         self._worker.certificate_exported.connect(self._on_certificate_exported)
         self._worker.pin_changed.connect(self._on_pin_changed)
         self._worker.pin_status_updated.connect(self._on_pin_status_updated)
+        self._worker.key_probe_completed.connect(self._on_key_probe_completed)
         self._worker.reset_completed.connect(self._on_reset_completed)
         self._worker.pcsc_status.connect(self._on_pcsc_status)
         self._worker.error_occurred.connect(self._on_error_occurred)
         self._worker.diagnose_result.connect(self._on_diagnose_result)
+
+        self._worker.set_key_cache(self._get_session_key_cache())
 
         self._worker_thread.start()
 
@@ -784,6 +819,65 @@ class PivTab(QWidget):
             self._worker_thread = None
             self._worker = None
 
+    def _device_cache_keys(self) -> list[str]:
+        """Return candidate cache keys for the current device, ordered by stability."""
+        if not self._device:
+            return []
+
+        keys = []
+
+        device_uuid = getattr(self._device, "device_uuid", None)
+        descriptor = getattr(self._device, "descriptor", None)
+        descriptor_uuid = getattr(descriptor, "uuid", None)
+        stable_uuid = device_uuid or descriptor_uuid
+        if stable_uuid:
+            keys.append(f"uuid:{stable_uuid}")
+
+        path = getattr(self._device, "path", "") or ""
+        if path:
+            keys.append(path)
+
+        descriptor_id = getattr(descriptor, "id", "") or ""
+        if descriptor_id:
+            keys.append(descriptor_id)
+
+        deduped = []
+        seen = set()
+        for key in keys:
+            if key and key not in seen:
+                seen.add(key)
+                deduped.append(key)
+        return deduped
+
+    def _get_session_key_cache(self) -> Dict[PivSlot, dict]:
+        """Return cached key hints for the current device, if any."""
+        for cache_key in self._device_cache_keys():
+            cache = self._session_key_cache_by_device.get(cache_key)
+            if cache:
+                return {slot: dict(info) for slot, info in cache.items()}
+        return {}
+
+    def _set_session_key_cache(self, cache: Dict[PivSlot, dict]) -> None:
+        """Store the current device cache under all known aliases."""
+        cache_keys = self._device_cache_keys()
+        if not cache_keys:
+            return
+
+        normalized = {slot: dict(info) for slot, info in (cache or {}).items()}
+        if normalized:
+            for cache_key in cache_keys:
+                self._session_key_cache_by_device[cache_key] = normalized
+            return
+
+        for cache_key in cache_keys:
+            self._session_key_cache_by_device.pop(cache_key, None)
+
+    def _store_worker_key_cache(self) -> None:
+        """Persist the worker's session-local key hints across reconnects."""
+        if not self._worker:
+            return
+        self._set_session_key_cache(self._worker.get_key_cache())
+
     def _set_controls_enabled(self, enabled: bool) -> None:
         pcsc_enabled = enabled and PCSC_AVAILABLE
         self._controls_available = pcsc_enabled
@@ -792,6 +886,7 @@ class PivTab(QWidget):
         self._change_pin_button.setEnabled(pcsc_enabled)
         self._unblock_pin_button.setEnabled(pcsc_enabled)
         self._change_puk_button.setEnabled(pcsc_enabled)
+        self._probe_keys_button.setEnabled(pcsc_enabled)
         self._diagnose_button.setEnabled(pcsc_enabled)
         self._update_reset_visibility()
 
@@ -862,6 +957,14 @@ class PivTab(QWidget):
                     slot_info = SlotInfo(slot, True, key_type_str, None)
                     self._slot_infos[slot] = slot_info
                     card.update_slot(slot_info)
+                if self._last_generated_key_type is not None:
+                    cache = self._get_session_key_cache()
+                    cache[slot] = {
+                        "key_type": self._last_generated_key_type,
+                        "algorithm": _KEY_TYPE_LABELS.get(self._last_generated_key_type),
+                        "has_certificate": False,
+                    }
+                    self._set_session_key_cache(cache)
             if pubkey_der:
                 self._show_pubkey_dialog(pubkey_der)
             else:
@@ -963,9 +1066,19 @@ class PivTab(QWidget):
         else:
             QMessageBox.critical(self, "Error", message)
 
+    def _on_key_probe_completed(self, success: bool, message: str) -> None:
+        self._set_busy(False)
+        if success:
+            self._status_label.setText(message or "PIN verified")
+            if message:
+                QMessageBox.information(self, "PIN Verified", message)
+        else:
+            QMessageBox.critical(self, "PIN Verification Failed", message or "PIN verification failed")
+
     def _on_reset_completed(self, success: bool, message: str) -> None:
         self._set_busy(False)
         if success:
+            self._set_session_key_cache({})
             QMessageBox.information(self, "Reset Complete", message)
             self._reload_slots()
             self._update_pin_status()
@@ -1021,7 +1134,9 @@ class PivTab(QWidget):
             self._set_busy(True, f"Generating key in {name} ({hex_id})...")
             self._worker.generate_key(
                 slot, dialog.get_key_type(),
-                dialog.get_pin() or None, dialog.get_mgmt_key()
+                dialog.get_pin() or None,
+                dialog.get_mgmt_key(),
+                dialog.get_touch_policy(),
             )
 
     def _import_certificate_for(self, slot: PivSlot) -> None:
@@ -1173,6 +1288,26 @@ class PivTab(QWidget):
             if current_puk and new_puk:
                 self._set_busy(True, "Changing PUK...")
                 self._worker.change_puk(current_puk, new_puk)
+
+    def _probe_keys_with_pin(self) -> None:
+        if not self._worker:
+            return
+        dialog = PivPinDialog(
+            self,
+            "Verify PIN to Probe Keys",
+            show_current=True,
+            show_new=False,
+            current_label="PIN:",
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        pin = dialog.get_current()
+        if not pin:
+            return
+
+        self._set_busy(True, "Verifying PIN and probing slots...")
+        self._worker.probe_slots_with_pin(pin)
 
     def _reset_piv(self) -> None:
         if not self._worker:
