@@ -173,7 +173,7 @@ class Fido2Tab(QWidget):
         credentials_layout = QVBoxLayout(credentials_group)
 
         intro = QLabel(
-            "Resident credentials — also called <b>passkeys</b> or discoverable credentials — "
+            "Resident credentials (also called <b>passkeys</b> or discoverable credentials) "
             "are FIDO2 logins stored directly on this device. "
             "They let you sign in without typing a username; "
             "the device itself knows which account to use."
