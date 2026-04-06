@@ -213,7 +213,8 @@ class OverviewTab(QWidget):
             self,
             "Confirm Firmware Update",
             f"Update firmware to version {self._firmware_info.version}?\n\n"
-            "The device will reboot to bootloader mode during the update.\n"
+            "The device will reboot to bootloader mode during the update. "
+            "Touch the device button when prompted to confirm the reboot.\n\n"
             "Do not disconnect the device during this process.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -242,6 +243,7 @@ class OverviewTab(QWidget):
             "Flash Firmware",
             f"Flash firmware from:\n{path}\n\n"
             "The device will reboot to bootloader mode. "
+            "Touch the device button when prompted to confirm the reboot.\n\n"
             "Do not disconnect during the process.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
