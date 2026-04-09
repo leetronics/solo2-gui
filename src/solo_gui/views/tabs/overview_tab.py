@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
-from solo_gui.models.device import SoloDevice, DeviceInfo, format_firmware_full
+from solo_gui.models.device import SoloDevice, DeviceInfo, DeviceMode, format_firmware_full
 from solo_gui.workers.firmware_worker import FirmwareUpdateWorker, FirmwareInfo
 
 
@@ -18,6 +18,11 @@ class OverviewTab(QWidget):
 
     check_variant_requested = Signal()
 
+    # Signals used to dispatch work onto the firmware worker's thread.
+    _check_updates_requested = Signal(str)
+    _perform_update_requested = Signal(object)
+    _flash_from_file_requested = Signal(str)
+
     def __init__(self):
         super().__init__()
         self._device: Optional[SoloDevice] = None
@@ -25,6 +30,7 @@ class OverviewTab(QWidget):
         self._firmware_thread: Optional[QThread] = None
         self._firmware_info: Optional[FirmwareInfo] = None
         self._isp_variant: Optional[str] = None
+        self._firmware_busy: bool = False  # True while a flash/update is in flight
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -78,7 +84,7 @@ class OverviewTab(QWidget):
         flash_layout = QVBoxLayout(self._flash_group)
         file_row = QHBoxLayout()
         self._flash_file_input = QLineEdit()
-        self._flash_file_input.setPlaceholderText("Path to firmware file (.bin or .sb2)…")
+        self._flash_file_input.setPlaceholderText("Path to firmware file (.bin)…")
         file_row.addWidget(self._flash_file_input)
         browse_btn = QPushButton("Browse…")
         browse_btn.clicked.connect(self._browse_firmware_file)
@@ -113,28 +119,36 @@ class OverviewTab(QWidget):
 
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
-        self._isp_variant = None
-        self._firmware_info = None
-        self._setup_firmware_worker()
-        self._update_device_info()
-        self._check_updates_button.setEnabled(True)
-        self._check_variant_btn.setEnabled(True)
-        self._update_flash_file_visibility()
+        if not self._firmware_busy:
+            self._isp_variant = None
+            self._firmware_info = None
+            self._setup_firmware_worker()
+            self._update_device_info()
+            self._check_updates_button.setEnabled(True)
+            self._check_variant_btn.setEnabled(True)
+            self._update_flash_file_visibility()
 
     def clear_device(self) -> None:
         self._device = None
-        self._isp_variant = None
-        self._firmware_info = None
-        self._cleanup_firmware_worker()
-        self._clear_device_info()
-        self._check_updates_button.setEnabled(False)
-        self._check_variant_btn.setEnabled(False)
-        self._flash_file_btn.setEnabled(False)
-        self._flash_group.setVisible(False)
+        if not self._firmware_busy:
+            self._isp_variant = None
+            self._firmware_info = None
+            self._cleanup_firmware_worker()
+            self._clear_device_info()
+            self._check_updates_button.setEnabled(False)
+            self._check_variant_btn.setEnabled(False)
+            self._flash_file_btn.setEnabled(False)
+            self._flash_group.setVisible(False)
 
     def on_variant_detected(self, result: str) -> None:
         """Receive ISP variant result from admin_tab and refresh device info."""
         self._isp_variant = result
+        # ISP probe is authoritative — propagate result to the firmware worker.
+        if self._firmware_worker:
+            if result == "Hacker (unlocked)":
+                self._firmware_worker._is_locked = False
+            elif result in ("Hacker (locked)", "Secure"):
+                self._firmware_worker._is_locked = True
         self._update_device_info()
 
     def _setup_firmware_worker(self) -> None:
@@ -142,13 +156,23 @@ class OverviewTab(QWidget):
         if not self._device:
             return
         self._firmware_thread = QThread()
-        variant = getattr(self._device, "variant", "")
-        self._firmware_worker = FirmwareUpdateWorker(self._device, variant=variant)
+        is_locked = getattr(self._device, "is_locked", None)
+        # Admin command 0x63 cannot read CMPA/PFR — it doesn't know about hardware
+        # Secure Boot state. It can reliably report True (locked), but False may be
+        # wrong for a "Hacker (locked)" device. Treat admin-reported False as unknown;
+        # only the ISP probe (detect_variant) can confirm unlocked.
+        worker_is_locked = True if is_locked is True else None
+        self._firmware_worker = FirmwareUpdateWorker(self._device, is_locked=worker_is_locked)
         self._firmware_worker.moveToThread(self._firmware_thread)
+        self._firmware_worker.update_started.connect(self._on_firmware_started)
         self._firmware_worker.update_progress.connect(self._on_firmware_progress)
         self._firmware_worker.firmware_info_found.connect(self._on_firmware_info)
         self._firmware_worker.update_completed.connect(self._on_update_completed)
         self._firmware_worker.error_occurred.connect(self._on_firmware_error)
+        # Dispatch signals: cross-thread queued connections keep the UI live.
+        self._check_updates_requested.connect(self._firmware_worker.check_for_updates)
+        self._perform_update_requested.connect(self._firmware_worker.perform_update)
+        self._flash_from_file_requested.connect(self._firmware_worker.flash_from_file)
         self._firmware_thread.start()
 
     def _cleanup_firmware_worker(self) -> None:
@@ -163,27 +187,31 @@ class OverviewTab(QWidget):
             self._clear_device_info()
             return
         info = self._device.get_info()
-        if self._isp_variant == "Hacker (unlocked)":
+        in_bootloader = info.mode == DeviceMode.BOOTLOADER
+        if in_bootloader:
+            # Lock status is unavailable in bootloader mode — admin commands don't
+            # work there. ISP variant (if probed) is shown in the dialog, not here.
+            variant_label = " (Bootloader)"
+        elif self._isp_variant == "Hacker (unlocked)":
             variant_label = " (unlocked)"
-        elif self._isp_variant == "Hacker (locked)":
+        elif self._isp_variant in ("Hacker (locked)", "Secure"):
             variant_label = " (locked)"
-        elif self._isp_variant == "Secure":
-            variant_label = " (Secure)"
         else:
-            fw = getattr(self._device, "variant", "")
-            if fw == "Hacker":
-                variant_label = " (unlocked)"
-            elif fw == "Secure":
+            is_locked = getattr(self._device, "is_locked", None)
+            # Only trust admin-reported locked (True); admin cannot confirm unlocked
+            # without ISP — treat False as unknown until ISP runs.
+            if is_locked is True:
                 variant_label = " (locked)"
             else:
-                variant_label = f" ({fw})" if fw else ""
+                variant_label = ""
         self._device_type_label.setText(f"Solo 2{variant_label}")
         self._firmware_label.setText(format_firmware_full(info.firmware_version))
         self._update_flash_file_visibility()
 
     def _update_flash_file_visibility(self) -> None:
-        variant = getattr(self._device, "variant", "") if self._device else ""
-        show_flash_from_file = variant == "Hacker"
+        # Only show flash-from-file when ISP has confirmed the device is unlocked.
+        # Admin command 0x63 (is_locked) cannot read CMPA so cannot be trusted here.
+        show_flash_from_file = self._isp_variant == "Hacker (unlocked)"
         self._flash_group.setVisible(show_flash_from_file)
         self._flash_file_btn.setEnabled(show_flash_from_file and self._device is not None)
         if not show_flash_from_file:
@@ -210,7 +238,7 @@ class OverviewTab(QWidget):
             return
         self._set_busy(True, "Checking for updates...")
         info = self._device.get_info()
-        self._firmware_worker.check_for_updates(info.firmware_version or "0")
+        self._check_updates_requested.emit(info.firmware_version or "0")
 
     def _start_firmware_update(self) -> None:
         if not self._firmware_worker or not self._firmware_info:
@@ -228,11 +256,11 @@ class OverviewTab(QWidget):
         if reply == QMessageBox.Yes:
             self._set_busy(True, "Starting firmware update...")
             self._check_updates_button.setEnabled(False)
-            self._firmware_worker.perform_update(self._firmware_info)
+            self._perform_update_requested.emit(self._firmware_info)
 
     def _browse_firmware_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Firmware File", "", "Firmware (*.bin *.sb2);;All Files (*)"
+            self, "Select Firmware File", "", "Firmware Binary (*.bin);;All Files (*)"
         )
         if path:
             self._flash_file_input.setText(path)
@@ -258,12 +286,31 @@ class OverviewTab(QWidget):
             self._set_busy(True, "Flashing firmware…")
             self._check_updates_button.setEnabled(False)
             self._flash_file_btn.setEnabled(False)
-            self._firmware_worker.flash_from_file(path)
+            self._flash_from_file_requested.emit(path)
+
+    def _replace_last_log_line(self, message: str) -> None:
+        """Overwrite the last line of the log (for in-place progress updates)."""
+        cursor = self._log_area.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.select(cursor.SelectionType.LineUnderCursor)
+        cursor.insertText(message)
+        self._log_area.setTextCursor(cursor)
+        self._log_area.verticalScrollBar().setValue(
+            self._log_area.verticalScrollBar().maximum()
+        )
+
+    def _on_firmware_started(self) -> None:
+        self._firmware_busy = True
 
     def _on_firmware_progress(self, progress: int, message: str) -> None:
         self._status_progress.setVisible(True)
         self._status_progress.setValue(progress)
-        self._log_area.appendPlainText(message)
+        # "Erasing: …" and "Writing: …" update the last line in place so the
+        # log doesn't fill with hundreds of identical progress lines.
+        if message.startswith(("Erasing: ", "Writing: ")):
+            self._replace_last_log_line(message)
+        else:
+            self._log_area.appendPlainText(message)
         self._log_area.verticalScrollBar().setValue(
             self._log_area.verticalScrollBar().maximum()
         )
@@ -284,18 +331,37 @@ class OverviewTab(QWidget):
             self._download_update_button.setVisible(False)
 
     def _on_update_completed(self, success: bool, message: str) -> None:
+        self._firmware_busy = False
         self._set_busy(False)
-        self._check_updates_button.setEnabled(self._device is not None)
-        self._flash_file_btn.setEnabled(self._device is not None)
         self._log_area.appendPlainText(message)
+        self._post_flash_setup()
         if success:
             QMessageBox.information(self, "Update Complete", message)
         else:
             QMessageBox.critical(self, "Update Failed", message)
 
     def _on_firmware_error(self, error: str) -> None:
+        self._firmware_busy = False
         self._set_busy(False)
-        self._check_updates_button.setEnabled(self._device is not None)
-        self._flash_file_btn.setEnabled(self._device is not None)
         self._log_area.appendPlainText(f"Error: {error}")
+        self._post_flash_setup()
         QMessageBox.critical(self, "Firmware Error", error)
+
+    def _post_flash_setup(self) -> None:
+        """Called after a flash finishes to tear down the old worker thread
+        (which is now idle so wait() returns instantly) and rebuild state."""
+        self._cleanup_firmware_worker()
+        if self._device:
+            self._isp_variant = None
+            self._firmware_info = None
+            self._setup_firmware_worker()
+            self._update_device_info()
+            self._check_updates_button.setEnabled(True)
+            self._check_variant_btn.setEnabled(True)
+            self._update_flash_file_visibility()
+        else:
+            self._clear_device_info()
+            self._check_updates_button.setEnabled(False)
+            self._check_variant_btn.setEnabled(False)
+            self._flash_file_btn.setEnabled(False)
+            self._flash_group.setVisible(False)

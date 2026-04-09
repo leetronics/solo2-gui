@@ -9,7 +9,7 @@ Uses DeviceManager for thread-safe device access.
 """
 
 import logging
-from typing import Optional
+import os
 
 from PySide6.QtCore import QObject, Signal
 
@@ -33,6 +33,7 @@ class AdminWorker(QObject):
     device_disconnected = Signal()
     variant_ready = Signal(str)
     unlock_ready = Signal()
+    relock_ready = Signal()
 
     def __init__(self, device):
         super().__init__()
@@ -167,57 +168,34 @@ class AdminWorker(QObject):
         self._device_manager.reset(on_reset, operation_id="admin_reset")
 
     def check_variant(self) -> None:
-        """
-        Detect Hacker/Secure variant via MCUBOOT ISP.
-
-        If the device is already known to be unlocked (variant == "Hacker"), returns
-        "Hacker (unlocked)" immediately without rebooting.
-
-        Otherwise reboots to bootloader, probes CMPA via MCUBOOT ISP:
-          "Secure"          — ISP read blocked (genuine Secure device)
-          "Hacker (locked)" — ISP read allowed (Hacker device, Secure Boot still active)
-        """
-        # Fast path: firmware already confirmed the device is unlocked
-        if getattr(self._device, "variant", "") == "Hacker":
-            self.operation_completed.emit(True, "Variant: Hacker (unlocked)")
-            self.variant_ready.emit("Hacker (unlocked)")
-            return
-
+        """Detect Hacker/Secure variant via MCUBOOT ISP (CMPA read)."""
         self.operation_started.emit("Checking device variant via hardware ISP…")
 
-        # Reboot to bootloader (device will disconnect — exception is expected)
-        try:
-            AdminSession(self._device).reboot(RebootMode.BOOTLOADER)
-        except Exception as exc:
-            _log.debug("check_variant: reboot-to-bootloader raised (expected): %s", exc)
+        def _progress(pct: int, msg: str) -> None:
+            self.operation_progress.emit(pct, msg)
 
-        # Wait for the bootloader USB device to appear
-        self.operation_progress.emit(30, "Waiting for bootloader…")
-        if not lpc55_isp.wait_for_bootloader(timeout_s=10.0):
-            self.error_occurred.emit(
-                "Bootloader device did not appear within 10 s.\n"
-                "Make sure the device is connected and try again."
-            )
-            return
-
-        # ISP variant probe
-        self.operation_progress.emit(60, "Probing CMPA via ISP…")
         try:
-            result = lpc55_isp.detect_variant()
+            result = lpc55_isp.check_variant_with_device(self._device, progress_cb=_progress)
         except lpc55_isp.Lpc55Error as exc:
             self.error_occurred.emit(f"ISP probe failed: {exc}")
             return
 
-        self.operation_progress.emit(100, "Done")
         self.operation_completed.emit(True, f"Variant: {result}")
         self.variant_ready.emit(result)
 
-    def unlock_device(self) -> None:
+    def unlock_device(self, pfr_yaml_path: str = "") -> None:
         """
         Disable Secure Boot on a Hacker (locked) device via MCUBOOT ISP.
 
-        Reboots to bootloader, zeroes the CMPA SHA256 digest field (which
-        disables Secure Boot on LPC55), then reboots back to firmware.
+        Reboots to bootloader, reads the signed firmware backup, zeroes the
+        CMPA SHA256 digest field (which disables Secure Boot on LPC55), then
+        reboots back to firmware.
+
+        If pfr_yaml_path is provided:
+          - The PFR YAML backup is saved to pfr_yaml_path.
+          - The signed firmware backup is saved to the same path with a .bin
+            extension (e.g. pfr_backup.yaml → pfr_backup.bin).
+        Both files are required for relock_device() to restore factory state.
         """
         self.operation_started.emit("Disabling Secure Boot…")
 
@@ -226,7 +204,7 @@ class AdminWorker(QObject):
         except Exception as exc:
             _log.debug("unlock_device: reboot-to-bootloader raised (expected): %s", exc)
 
-        self.operation_progress.emit(25, "Waiting for bootloader…")
+        self.operation_progress.emit(10, "Waiting for bootloader…")
         if not lpc55_isp.wait_for_bootloader(timeout_s=10.0):
             self.error_occurred.emit(
                 "Bootloader device did not appear within 10 s.\n"
@@ -234,16 +212,85 @@ class AdminWorker(QObject):
             )
             return
 
-        self.operation_progress.emit(60, "Writing PFR settings…")
         try:
-            lpc55_isp.disable_secure_boot()
+            pfr_yaml, firmware = lpc55_isp.disable_secure_boot(
+                progress_cb=lambda pct, msg: self.operation_progress.emit(
+                    10 + int(pct * 85 / 100), msg
+                )
+            )
         except lpc55_isp.Lpc55Error as exc:
             self.error_occurred.emit(f"Unlock failed: {exc}")
             return
 
+        if pfr_yaml_path:
+            try:
+                with open(pfr_yaml_path, "w") as f:
+                    f.write(pfr_yaml)
+            except OSError as exc:
+                _log.warning("Failed to save PFR YAML backup to %s: %s", pfr_yaml_path, exc)
+
+            if firmware:
+                fw_path = os.path.splitext(pfr_yaml_path)[0] + ".bin"
+                try:
+                    with open(fw_path, "wb") as f:
+                        f.write(firmware)
+                    _log.debug("unlock_device: firmware backup saved to %s (%d B)", fw_path, len(firmware))
+                except OSError as exc:
+                    _log.warning("Failed to save firmware backup to %s: %s", fw_path, exc)
+            else:
+                _log.warning("unlock_device: no firmware backup available (flash was blank)")
+
         self.operation_progress.emit(100, "Done")
         self.operation_completed.emit(True, "Secure Boot disabled — device is now unlocked")
         self.unlock_ready.emit()
+
+    def relock_device(self, pfr_yaml_path: str) -> None:
+        """Re-enable Secure Boot using a saved PFR YAML backup.
+
+        Loads the PFR YAML backup from pfr_yaml_path and the signed firmware
+        backup from the same path with a .bin extension (e.g. pfr_backup.yaml
+        → pfr_backup.bin).  Both are saved by unlock_device().
+
+        The firmware backup is used to restore the original signed firmware
+        after erase_all.  If no .bin backup is found, the firmware currently
+        in flash is used as fallback (only works if it is already the original
+        SoloKeys-signed build).
+        """
+        self.operation_started.emit("Relocking device…")
+
+        try:
+            with open(pfr_yaml_path, "r") as f:
+                pfr_yaml = f.read()
+        except OSError as exc:
+            self.error_occurred.emit(f"Cannot read PFR YAML backup: {exc}")
+            return
+
+        # Load firmware backup saved alongside the YAML during unlock.
+        firmware = b""
+        fw_path = os.path.splitext(pfr_yaml_path)[0] + ".bin"
+        if os.path.exists(fw_path):
+            try:
+                with open(fw_path, "rb") as f:
+                    firmware = f.read()
+                _log.debug("relock_device: loaded firmware backup from %s (%d B)", fw_path, len(firmware))
+            except OSError as exc:
+                _log.warning("Failed to load firmware backup from %s: %s", fw_path, exc)
+        else:
+            _log.debug("relock_device: no firmware backup at %s — will read from flash", fw_path)
+
+        def _progress(pct: int, msg: str) -> None:
+            self.operation_progress.emit(pct, msg)
+
+        try:
+            lpc55_isp.relock_with_device(
+                self._device, pfr_yaml, firmware, progress_cb=_progress
+            )
+        except lpc55_isp.Lpc55Error as exc:
+            self.error_occurred.emit(f"Relock failed: {exc}")
+            return
+
+        self.operation_completed.emit(True, "Device relocked — Secure Boot re-enabled")
+        self.relock_ready.emit()
 
     def wink(self) -> None:
         """Wink device LED."""

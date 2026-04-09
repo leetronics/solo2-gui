@@ -92,6 +92,9 @@ class AdminTab(QWidget):
         self._worker_thread: Optional[QThread] = None
         self._isp_monitoring_paused = False
         self._last_isp_variant: Optional[str] = None
+        # Survives clear_device() so the ISP result is restored after a device
+        # reconnect (e.g. after check_variant reboots back to firmware mode).
+        self._pending_isp_variant: Optional[str] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -118,9 +121,11 @@ class AdminTab(QWidget):
         quick_layout.addLayout(btn_row)
         unlock_desc = QLabel(
             "<b>Unlock Device</b> disables Secure Boot on Hacker devices, "
-            "allowing custom firmware to be flashed freely.<br>"
-            "Use <b>Check Variant</b> in the Overview tab first to confirm the device type. "
-            "The Unlock button becomes available once the device is confirmed as Hacker (locked)."
+            "allowing custom firmware to be flashed freely via "
+            "<tt>lpc55 write-flash</tt> or <b>Flash from File</b>.<br>"
+            "<b>Warning: unlocking is permanent</b> — restoring factory Secure Boot "
+            "is not currently supported. Only unlock if you intend to run custom firmware.<br>"
+            "Use <b>Check Variant</b> in the Overview tab first to confirm the device type."
         )
         unlock_desc.setTextFormat(Qt.RichText)
         unlock_desc.setWordWrap(True)
@@ -237,14 +242,25 @@ class AdminTab(QWidget):
     def set_device(self, device: SoloDevice) -> None:
         self._device = device
         self._setup_worker()
+        # Restore ISP result that survived the clear_device() during reconnect.
+        restored_variant = None
+        if self._pending_isp_variant is not None:
+            self._last_isp_variant = self._pending_isp_variant
+            restored_variant = self._pending_isp_variant
+            self._pending_isp_variant = None
         caps = getattr(device, "capabilities", None)
         self._apply_capabilities(caps)
+        # Re-emit so overview_tab updates _isp_variant and flash-from-file visibility.
+        if restored_variant is not None:
+            self.variant_detected.emit(restored_variant)
         self._status_label.setText("Device connected")
 
     def clear_device(self) -> None:
         self._cleanup_worker()
         self._device = None
         self._last_isp_variant = None
+        # _pending_isp_variant is intentionally NOT cleared here — it persists
+        # so set_device() can restore the unlock-button state after reconnect.
         self._set_controls_enabled(False)
         self._status_label.setText("No device connected")
         self._set_factory_reset_hint("")
@@ -265,6 +281,7 @@ class AdminTab(QWidget):
         self._admin_worker.device_disconnected.connect(self._on_device_disconnected)
         self._admin_worker.variant_ready.connect(self._on_variant_ready)
         self._admin_worker.unlock_ready.connect(self._on_unlock_ready)
+        self._admin_worker.relock_ready.connect(self._on_relock_ready)
         self._worker_thread.start()
 
     def _cleanup_worker(self) -> None:
@@ -356,11 +373,21 @@ class AdminTab(QWidget):
         """Public entry point — called from overview tab via main_window."""
         if not self._admin_worker:
             return
-        variant = getattr(self._device, "variant", "") if self._device else ""
-        if variant == "Hacker":
-            # Fast path: no reboot needed, skip the confirmation dialog.
+
+        try:
+            already_in_bootloader = (
+                self._device is not None
+                and self._device.get_info().mode.value == "bootloader"
+            )
+        except Exception:
+            already_in_bootloader = False
+
+        if already_in_bootloader:
+            # Device is already in bootloader — ISP probe runs without rebooting,
+            # and the device is left in bootloader so "Unlock Device" works immediately.
             self._admin_worker.check_variant()
             return
+
         reply = QMessageBox.question(
             self,
             "Check Device Variant",
@@ -382,17 +409,20 @@ class AdminTab(QWidget):
         reply = QMessageBox.warning(
             self,
             "Disable Secure Boot",
-            "This will disable Secure Boot on this Hacker device.\n\n"
-            "After unlocking, unsigned (custom) firmware can be flashed freely.\n"
-            "Secure Boot can be re-enabled later via the lpc55 CLI if needed.\n\n"
+            "This will permanently disable Secure Boot on this Hacker device.\n\n"
+            "After unlocking, unsigned (custom) firmware can be flashed freely.\n\n"
+            "WARNING: Restoring factory Secure Boot is not currently supported.\n"
+            "Only proceed if you intend to run custom firmware on this device.\n\n"
             "The device will reboot briefly. Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
-        if reply == QMessageBox.Yes:
-            self._isp_monitoring_paused = True
-            self.reconnect_prepare.emit()
-            self._admin_worker.unlock_device()
+        if reply != QMessageBox.Yes:
+            return
+
+        self._isp_monitoring_paused = True
+        self.reconnect_prepare.emit()
+        self._admin_worker.unlock_device()
 
     def _reboot(self, mode: RebootMode) -> None:
         mode_name = "bootloader" if mode == RebootMode.BOOTLOADER else "normal"
@@ -479,6 +509,7 @@ class AdminTab(QWidget):
             self._isp_monitoring_paused = False
 
         self._last_isp_variant = result
+        self._pending_isp_variant = result  # survives reconnect → set_device restores it
         self._unlock_btn.setEnabled(result == "Hacker (locked)")
         self.variant_detected.emit(result)
 
@@ -517,13 +548,48 @@ class AdminTab(QWidget):
         msg.setTextInteractionFlags(Qt.TextBrowserInteraction)
         msg.exec()
 
+    def _relock_device(self) -> None:
+        if not self._admin_worker:
+            return
+
+        reply = QMessageBox.warning(
+            self,
+            "Relock Device",
+            "This will re-enable Secure Boot and restore the original signed firmware.\n\n"
+            "You need the backup files saved during Unlock:\n"
+            "  • <name>.yaml — PFR YAML (select this file in the next dialog)\n"
+            "  • <name>.bin  — signed firmware backup (loaded automatically\n"
+            "    from the same folder, same base name as the .yaml)\n\n"
+            "The device flash will be erased and the original signed firmware\n"
+            "restored from the .bin backup.  If no .bin is found alongside the\n"
+            ".yaml, the firmware currently in flash is used as fallback.\n\n"
+            "Do NOT disconnect during the process.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        cmpa_path, _ = QFileDialog.getOpenFileName(
+            self, "Select PFR YAML Backup", "", "PFR YAML Backup (*.yaml);;All Files (*)"
+        )
+        if not cmpa_path:
+            return
+
+        self._isp_monitoring_paused = True
+        self.reconnect_prepare.emit()
+        self._admin_worker.relock_device(cmpa_path)
+
     def _on_unlock_ready(self) -> None:
         if self._isp_monitoring_paused:
             self.isp_done.emit()
             self._isp_monitoring_paused = False
 
         self._last_isp_variant = "Hacker (unlocked)"
+        self._pending_isp_variant = "Hacker (unlocked)"
         self._unlock_btn.setEnabled(False)
+        self.variant_detected.emit("Hacker (unlocked)")
 
         msg = QMessageBox(self)
         msg.setWindowTitle("Device Unlocked")
@@ -533,6 +599,29 @@ class AdminTab(QWidget):
             "This device is now a <b>Hacker (unlocked)</b> device.<br>"
             "Custom firmware can be flashed freely via <b>Flash from File</b> "
             "or the <tt>lpc55 write-flash</tt> CLI command."
+        )
+        msg.setIcon(QMessageBox.Information)
+        msg.exec()
+
+    def _on_relock_ready(self) -> None:
+        if self._isp_monitoring_paused:
+            self.isp_done.emit()
+            self._isp_monitoring_paused = False
+
+        self._last_isp_variant = "Hacker (locked)"
+        self._pending_isp_variant = "Hacker (locked)"
+        self._relock_btn.setEnabled(False)
+        self._unlock_btn.setEnabled(True)
+        self.variant_detected.emit("Hacker (locked)")
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Device Relocked")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(
+            "<b>Secure Boot has been re-enabled.</b><br><br>"
+            "This device is now a <b>Hacker (locked)</b> device.<br>"
+            "Only SoloKeys-signed firmware can be installed.<br>"
+            "Use <b>Unlock Device</b> to disable Secure Boot again if needed."
         )
         msg.setIcon(QMessageBox.Information)
         msg.exec()
