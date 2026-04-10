@@ -549,15 +549,12 @@ class MainWindow(QMainWindow):
         suffix = " (Bootloader)" if in_bootloader else ""
         fw_str = format_firmware_version(info.firmware_version)
 
-        variant = getattr(device, "variant", "")
-        if variant == "Hacker":
-            variant_label = " (unlocked)"
-        elif variant == "Secure":
-            variant_label = " (locked)"
-        else:
-            variant_label = f" ({variant})" if variant else ""
+        is_locked = getattr(device, "is_locked", None)
+        # Only trust admin-reported locked (True); admin cannot confirm unlocked
+        # without ISP — show nothing until ISP confirms via "Check Variant".
+        variant_label = " (locked)" if is_locked is True else ""
         self._device_label.setText(f"Solo 2{variant_label}{suffix} - fw {fw_str}")
-        self._variant_help_lbl.setVisible(bool(variant) and not in_bootloader)
+        self._variant_help_lbl.setVisible(is_locked is True and not in_bootloader)
 
         self._set_tabs_enabled(True)
 

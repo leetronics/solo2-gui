@@ -50,10 +50,10 @@ class FirmwareUpdateWorker(QObject):
     firmware_info_found = Signal(object)  # FirmwareInfo or None
     bootloader_mode_changed = Signal(bool)  # True if in bootloader mode
 
-    def __init__(self, device, variant: str = ""):
+    def __init__(self, device, is_locked: Optional[bool] = None):
         super().__init__()
         self._device = device
-        self._variant = variant  # "Hacker", "Secure", or ""
+        self._is_locked = is_locked  # True=locked, False=unlocked, None=unknown
 
     def _open_hid_device(self):
         """Open HID device connection."""
@@ -169,17 +169,17 @@ class FirmwareUpdateWorker(QObject):
                 return False
 
             is_sb2 = _is_sb2_file(firmware_data)
-            if self._variant == "Secure" and not is_sb2:
+            if self._is_locked is True and not is_sb2:
                 self.error_occurred.emit(
-                    "This is a Secure device — only signed SB2.1 firmware (.sb2) can be flashed.\n"
+                    "This device is locked — only signed SB2.1 firmware (.sb2) can be flashed.\n"
                     "A raw .bin file will not boot on this device."
                 )
                 return False
-            if self._variant == "" and not is_sb2:
+            if self._is_locked is None and not is_sb2:
                 self.error_occurred.emit(
-                    "Device variant could not be determined reliably.\n"
-                    "Refusing to flash a raw .bin because this may be a Secure device.\n"
-                    "Reconnect the token and try again, or use a signed SB2.1 firmware file."
+                    "Device lock status could not be determined.\n"
+                    "Refusing to flash a raw .bin in case the device is locked.\n"
+                    "Use 'Check Variant' in the Overview tab, or use a signed SB2.1 firmware file."
                 )
                 return False
 
@@ -267,16 +267,16 @@ class FirmwareUpdateWorker(QObject):
 
     def perform_update(self, firmware_info: FirmwareInfo) -> None:
         """Perform complete firmware update process."""
-        if self._variant == "Secure":
+        if self._is_locked is True:
             if not firmware_info.sb2_url:
                 self.update_completed.emit(
                     False,
                     "No signed SB2.1 firmware found in the latest release.\n"
-                    "Cannot update a Secure device with an unsigned binary."
+                    "Cannot update a locked device with an unsigned binary."
                 )
                 return
             url = firmware_info.sb2_url
-        elif self._variant == "Hacker":
+        elif self._is_locked is False:
             url = firmware_info.download_url or firmware_info.sb2_url
             if not url:
                 self.update_completed.emit(False, "No firmware asset found in the latest release.")
@@ -285,14 +285,14 @@ class FirmwareUpdateWorker(QObject):
             if not firmware_info.sb2_url:
                 self.update_completed.emit(
                     False,
-                    "Device variant could not be determined reliably.\n"
+                    "Device lock status could not be determined.\n"
                     "Refusing automatic update because no signed SB2.1 firmware asset is available."
                 )
                 return
             url = firmware_info.sb2_url
             self.update_progress.emit(
                 0,
-                "Device variant is unknown; using signed SB2.1 firmware as a safe default.",
+                "Device lock status is unknown; using signed SB2.1 firmware as a safe default.",
             )
             if not url:
                 self.update_completed.emit(False, "No firmware asset found in the latest release.")
@@ -332,6 +332,12 @@ class FirmwareUpdateWorker(QObject):
                 pct, f"Writing: {written // 1024}/{total_bytes // 1024} KB"
             )
 
+        def _erase_progress(erased: int, total_bytes: int) -> None:
+            pct = 62 + int(erased / total_bytes * 3)
+            self.update_progress.emit(
+                pct, f"Erasing: {erased // 1024}/{total_bytes // 1024} KB"
+            )
+
         with BootloaderSession.find(timeout=15) as bl:
             self.update_progress.emit(60, "Bootloader connected")
             if use_sb2:
@@ -339,7 +345,7 @@ class FirmwareUpdateWorker(QObject):
                 bl.receive_sb_file(firmware_data, progress_cb=_progress)
             else:
                 self.update_progress.emit(62, "Erasing flash…")
-                bl.write_flash(firmware_data, progress_cb=_progress)
+                bl.write_flash(firmware_data, progress_cb=_progress, erase_progress_cb=_erase_progress)
             self.update_progress.emit(92, "Write complete — sending reset command…")
             time.sleep(0.5)  # give bootloader time to finalize before reset
             bl.reset()
