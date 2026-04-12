@@ -6,7 +6,7 @@ set -e
 SITE_PACKAGES="/usr/lib/solokeys-gui/site-packages"
 REQUIREMENTS="/usr/lib/solokeys-gui/requirements-bundled.txt"
 case "$1" in
-    configure|upgrade)
+    configure|upgrade|triggered)
         python3 -m pip install \
             --target "${SITE_PACKAGES}" \
             --requirement "${REQUIREMENTS}" \

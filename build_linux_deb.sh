@@ -48,6 +48,7 @@ linux_pkg_prepare_root "${PKG_ROOT}" "${APP_VERSION}" "${WORK_DIR}"
 install -d "${PKG_ROOT}/DEBIAN"
 install -m 0755 "packaging/linux/debian/postinst" "${PKG_ROOT}/DEBIAN/postinst"
 install -m 0755 "packaging/linux/debian/postrm" "${PKG_ROOT}/DEBIAN/postrm"
+install -m 0644 "packaging/linux/debian/triggers" "${PKG_ROOT}/DEBIAN/triggers"
 
 INSTALLED_SIZE="$(du -sk "${PKG_ROOT}" | cut -f1)"
 cat > "${PKG_ROOT}/DEBIAN/control" <<EOF
