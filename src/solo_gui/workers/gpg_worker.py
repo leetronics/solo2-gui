@@ -23,17 +23,11 @@ import platform
 
 from PySide6.QtCore import QObject, Signal
 
-# Try to import PCSC support
-try:
-    from smartcard.System import readers
-    from smartcard.Exceptions import NoCardException, CardConnectionException
-    from smartcard.util import toHexString, toBytes
-
-    PCSC_AVAILABLE = True
-    PCSC_IMPORT_ERROR = ""
-except ImportError as e:
-    PCSC_AVAILABLE = False
-    PCSC_IMPORT_ERROR = str(e)
+from solo2.pcsc import (
+    PCSC_AVAILABLE,
+    PCSC_IMPORT_ERROR,
+    iter_pcsc_connections,
+)
 
 
 # OpenPGP Application AID (standard, ISO 7816-5)
@@ -515,53 +509,24 @@ class GpgWorker(QObject):
     def _connect(self) -> bool:
         """Open PCSC connection to a usable CCID reader.
 
-        Solo 2 exposes an ICCD reader. On some systems pyscard auto-detect picks
-        a protocol that later breaks APDU exchange or immediately fails to
-        connect. Prefer T=1 first, then fall back to auto.
+        Solo 2 exposes an ICCD reader. Protocol selection (T=1 preferred,
+        then auto) is handled transparently by iter_pcsc_connections().
         """
         if not PCSC_AVAILABLE:
             self.error_occurred.emit(self._pcsc_unavailable_message())
             return False
-        try:
-            available_readers = readers()
-            if not available_readers:
-                self.error_occurred.emit(self._no_reader_message())
-                return False
-            try:
-                from smartcard.CardConnection import CardConnection as _CC
-                protocols = [_CC.T1_protocol, None]
-            except Exception:
-                protocols = [None]
 
-            for reader in available_readers:
-                for protocol in protocols:
-                    conn = None
-                    try:
-                        conn = reader.createConnection()
-                        if protocol is not None:
-                            conn.connect(protocol)
-                        else:
-                            conn.connect()
-                        self._connection = conn
-                        self._reader = reader
-                        return True
-                    except Exception:
-                        if conn is not None:
-                            try:
-                                conn.disconnect()
-                            except Exception:
-                                pass
-                        continue
-            return False
-        except Exception:
-            return False
+        for connection in iter_pcsc_connections():
+            self._connection = connection
+            self._reader = connection.reader_name
+            return True
+
+        self.error_occurred.emit(self._no_reader_message())
+        return False
 
     def _disconnect(self) -> None:
         if self._connection:
-            try:
-                self._connection.disconnect()
-            except Exception:
-                pass
+            self._connection.close()
             self._connection = None
         self._reader = None
 

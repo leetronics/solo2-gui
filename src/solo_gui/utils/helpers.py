@@ -4,56 +4,6 @@ import time
 from typing import Optional
 
 from PySide6.QtWidgets import QMessageBox, QWidget
-from fido2.ctap2 import PinProtocolV1
-from fido2.ctap2.base import Ctap2
-
-from solo_gui.models.device import SoloDevice
-
-
-def verify_pin_with_retry(
-    device: SoloDevice, parent: Optional[QWidget] = None
-) -> Optional[str]:
-    """Prompt for PIN and verify with retry counter handling.
-
-    Args:
-        device: The SoloKeys device
-        parent: Parent widget for dialogs
-
-    Returns:
-        PIN token if successful, None otherwise
-    """
-    if not device.ctap2:
-        return None
-
-    ctap2 = device.ctap2
-    pin_protocol = PinProtocolV1()
-
-    try:
-        # Get PIN retry counter
-        info = ctap2.get_info()
-        retries = info.pin_retries
-
-        if retries is None:
-            retries = 8  # Default
-
-        if retries == 0:
-            QMessageBox.critical(
-                parent, "PIN Locked", "PIN is locked. Please use PUK to unblock."
-            )
-            return None
-
-        # TODO: Show PIN dialog with retry counter
-        pin = "123456"  # Placeholder - should use PIN dialog
-
-        # Get PIN token
-        client_pin = ctap2.client_pin
-        pin_token = client_pin.get_pin_token(pin, pin_protocol)
-
-        return pin_token
-
-    except Exception as e:
-        QMessageBox.critical(parent, "PIN Error", f"Failed to verify PIN: {e}")
-        return None
 
 
 def format_firmware_version(version: str) -> str:

@@ -20,17 +20,12 @@ DEFAULT_MANAGEMENT_KEY = "010203040506070801020304050607080102030405060708"
 
 from PySide6.QtCore import QObject, Signal
 
-# Try to import PCSC support
-try:
-    from smartcard.System import readers
-    from smartcard.Exceptions import NoCardException, CardConnectionException
-    from smartcard.util import toHexString, toBytes
-
-    PCSC_AVAILABLE = True
-    PCSC_IMPORT_ERROR = ""
-except ImportError as e:
-    PCSC_AVAILABLE = False
-    PCSC_IMPORT_ERROR = str(e)
+from solo2.pcsc import (
+    PCSC_AVAILABLE,
+    PCSC_IMPORT_ERROR,
+    iter_pcsc_connections,
+    list_pcsc_reader_names,
+)
 
 
 class PivKeyType(Enum):
@@ -209,13 +204,73 @@ class PivWorker(QObject):
         if not self.check_pcsc_available():
             return False
 
-        try:
-            reader_list = readers()
-        except Exception as e:
-            self.error_occurred.emit(f"Failed to list PCSC readers: {e}")
-            return False
+        # SELECT variants to try.  Short 5-byte AID (like ykman uses), 9-byte AID
+        # (without version bytes), and full 11-byte AID — each in Case-3 (no Le)
+        # and Case-4 (Le=0x00) forms.
+        SHORT_AID = [0xA0, 0x00, 0x00, 0x03, 0x08]
+        # 9-byte AID is the minimum accepted by piv-authenticator (new_truncatable min=9).
+        # solo2-cli sends exactly the 9-byte AID + Le=0x00 (Case 4).
+        MID_AID = [0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00]
+        select_variants = [
+            [0x00, INS_SELECT, 0x04, 0x00, len(MID_AID)] + MID_AID + [0x00],     # 9-byte, Case 4  ← solo2-cli format
+            [0x00, INS_SELECT, 0x04, 0x00, len(MID_AID)] + MID_AID,              # 9-byte, Case 3
+            [0x00, INS_SELECT, 0x04, 0x00, len(PIV_AID)] + PIV_AID + [0x00],     # full, Case 4
+            [0x00, INS_SELECT, 0x04, 0x00, len(PIV_AID)] + PIV_AID,              # full, Case 3
+            [0x00, INS_SELECT, 0x04, 0x00, len(SHORT_AID)] + SHORT_AID + [0x00], # short, Case 4
+            [0x00, INS_SELECT, 0x04, 0x00, len(SHORT_AID)] + SHORT_AID,          # short, Case 3
+        ]
 
-        if not reader_list:
+        last_error = "No PCSC readers found"
+        found_any_reader = False
+
+        for connection in iter_pcsc_connections():
+            found_any_reader = True
+            try:
+                # --- Try SELECT AID ---
+                selected = False
+                for select_cmd in select_variants:
+                    response, sw1, sw2 = connection.transmit(select_cmd)
+                    # SW=9000 or SW=61xx (success + FCI pending) both mean OK
+                    if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61:
+                        selected = True
+                        break
+                    last_error = (
+                        f"PIV SELECT failed on '{connection.reader_name}': "
+                        f"SW={sw1:02X}{sw2:02X}"
+                    )
+
+                if selected:
+                    self._connection = connection
+                    self._selected = True
+                    return True
+
+                # --- SELECT failed: probe for pre-selected PIV.
+                # VERIFY (INS=0x20, P2=0x80) returns 63Cx/69xx on a PIV card;
+                # non-PIV interfaces return 6D00 (INS not supported).
+                probe_cmd = [0x00, INS_VERIFY, 0x00, 0x80]
+                response, sw1, sw2 = connection.transmit(probe_cmd)
+                piv_sw = (
+                    sw1 == 0x63
+                    or (sw1 == 0x69 and sw2 in (0x82, 0x83))
+                    or (sw1 == 0x90 and sw2 == 0x00)
+                )
+                if piv_sw:
+                    self._connection = connection
+                    self._selected = True
+                    return True
+
+                select_sw = last_error.split("SW=")[-1] if "SW=" in last_error else "?"
+                last_error = (
+                    f"PIV not accessible on '{connection.reader_name}' "
+                    f"(SELECT SW={select_sw}, probe SW={sw1:02X}{sw2:02X})"
+                )
+                connection.close()
+
+            except Exception as e:
+                last_error = f"Error on '{connection.reader_name}': {e}"
+                connection.close()
+
+        if not found_any_reader:
             if platform.system() == "Windows":
                 self.error_occurred.emit(
                     "No PCSC readers found.\n"
@@ -232,104 +287,6 @@ class PivWorker(QObject):
                     "  sudo systemctl start pcscd"
                 )
             return False
-
-        # SELECT variants to try.  Short 5-byte AID (like ykman uses), 9-byte AID
-        # (without version bytes), and full 11-byte AID — each in Case-3 (no Le)
-        # and Case-4 (Le=0x00) forms.
-        SHORT_AID = [0xA0, 0x00, 0x00, 0x03, 0x08]
-        # 9-byte AID is the minimum accepted by piv-authenticator (new_truncatable min=9).
-        # solo2-cli sends exactly the 9-byte AID + Le=0x00 (Case 4).
-        MID_AID = [0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00]
-        select_variants = [
-            [0x00, INS_SELECT, 0x04, 0x00, len(MID_AID)] + MID_AID + [0x00],        # 9-byte, Case 4  ← solo2-cli format
-            [0x00, INS_SELECT, 0x04, 0x00, len(MID_AID)] + MID_AID,                 # 9-byte, Case 3
-            [0x00, INS_SELECT, 0x04, 0x00, len(PIV_AID)] + PIV_AID + [0x00],        # full, Case 4
-            [0x00, INS_SELECT, 0x04, 0x00, len(PIV_AID)] + PIV_AID,                 # full, Case 3
-            [0x00, INS_SELECT, 0x04, 0x00, len(SHORT_AID)] + SHORT_AID + [0x00],    # short, Case 4
-            [0x00, INS_SELECT, 0x04, 0x00, len(SHORT_AID)] + SHORT_AID,             # short, Case 3
-        ]
-
-        last_error = "No reader responded to PIV SELECT"
-
-        # ICCD devices (integrated card in USB device, like Solo 2) require T=1.
-        # pyscard auto-detection may pick T=0 which corrupts APDU framing for ICCD.
-        # We try T=1 first, then fall back to auto-detect.
-        try:
-            from smartcard.CardConnection import CardConnection as _CC
-            _PROTOCOLS = [_CC.T1_protocol, None]  # None = pyscard auto
-        except Exception:
-            _PROTOCOLS = [None]
-
-        for reader in reader_list:
-            for protocol in _PROTOCOLS:
-                conn = None
-                try:
-                    conn = reader.createConnection()
-                    if protocol is not None:
-                        conn.connect(protocol)
-                    else:
-                        conn.connect()
-
-                    # --- Try SELECT AID ---
-                    selected = False
-                    for select_cmd in select_variants:
-                        response, sw1, sw2 = conn.transmit(select_cmd)
-                        # SW=9000 or SW=61xx (success + FCI pending) both mean OK
-                        if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61:
-                            selected = True
-                            break
-                        last_error = (
-                            f"PIV SELECT failed on '{reader}' "
-                            f"(protocol={'T1' if protocol else 'auto'}): "
-                            f"SW={sw1:02X}{sw2:02X}"
-                        )
-
-                    if selected:
-                        self._connection = conn
-                        self._selected = True
-                        return True
-
-                    # --- SELECT failed: probe for pre-selected PIV.
-                    # VERIFY (INS=0x20, P2=0x80) returns 63Cx/69xx on a PIV card;
-                    # non-PIV interfaces return 6D00 (INS not supported).
-                    probe_cmd = [0x00, INS_VERIFY, 0x00, 0x80]
-                    response, sw1, sw2 = conn.transmit(probe_cmd)
-                    piv_sw = (
-                        sw1 == 0x63
-                        or (sw1 == 0x69 and sw2 in (0x82, 0x83))
-                        or (sw1 == 0x90 and sw2 == 0x00)
-                    )
-                    if piv_sw:
-                        self._connection = conn
-                        self._selected = True
-                        return True
-
-                    select_sw = last_error.split("SW=")[-1] if "SW=" in last_error else "?"
-                    last_error = (
-                        f"PIV not accessible on '{reader}' "
-                        f"(SELECT SW={select_sw}, probe SW={sw1:02X}{sw2:02X})"
-                    )
-                    try:
-                        conn.disconnect()
-                    except Exception:
-                        pass
-                    conn = None
-                    break  # same reader with different protocol unlikely to help after probe
-
-                except NoCardException:
-                    last_error = f"No card in '{reader}'"
-                    break
-                except CardConnectionException as e:
-                    last_error = f"Connection failed on '{reader}' (protocol={'T1' if protocol else 'auto'}): {e}"
-                except Exception as e:
-                    last_error = f"Error on '{reader}': {e}"
-                    if conn:
-                        try:
-                            conn.disconnect()
-                        except Exception:
-                            pass
-                    conn = None
-                    # Try next protocol
 
         hint = ""
         if "6A82" in last_error:
@@ -348,10 +305,7 @@ class PivWorker(QObject):
     def _disconnect(self) -> None:
         """Disconnect from the device."""
         if self._connection:
-            try:
-                self._connection.disconnect()
-            except Exception:
-                pass
+            self._connection.close()
             self._connection = None
             self._selected = False
 
@@ -656,46 +610,18 @@ class PivWorker(QObject):
         MID_AID = [0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00]
         select_cmd = [0x00, INS_SELECT, 0x04, 0x00, len(MID_AID)] + MID_AID + [0x00]
 
-        try:
-            from smartcard.CardConnection import CardConnection as _CC
-            protocols = [_CC.T1_protocol, None]
-        except Exception:
-            protocols = [None]
-
         for attempt in range(6):
             if attempt > 0:
                 time.sleep(0.5)
-            try:
-                reader_list = readers()
-            except Exception:
-                continue
-            if not reader_list:
-                continue
-
-            for reader in reader_list:
-                for proto in protocols:
-                    conn = None
-                    try:
-                        conn = reader.createConnection()
-                        if proto is not None:
-                            conn.connect(proto)
-                        else:
-                            conn.connect()
-                        _resp, sw1, sw2 = conn.transmit(select_cmd)
-                        try:
-                            conn.disconnect()
-                        except Exception:
-                            pass
-                        if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61:
-                            self.piv_probed.emit(True)
-                            return
-                        break  # wrong SW, try next reader not next protocol
-                    except Exception:
-                        if conn:
-                            try:
-                                conn.disconnect()
-                            except Exception:
-                                pass
+            for connection in iter_pcsc_connections():
+                try:
+                    _resp, sw1, sw2 = connection.transmit(select_cmd)
+                    connection.close()
+                    if (sw1 == 0x90 and sw2 == 0x00) or sw1 == 0x61:
+                        self.piv_probed.emit(True)
+                        return
+                except Exception:
+                    connection.close()
 
         self.piv_probed.emit(False)
 
@@ -1387,13 +1313,8 @@ class PivWorker(QObject):
             )
             return
 
-        try:
-            reader_list = readers()
-        except Exception as e:
-            self.diagnose_result.emit(f"Failed to list PCSC readers: {e}")
-            return
-
-        if not reader_list:
+        reader_names = list_pcsc_reader_names()
+        if not reader_names:
             self.diagnose_result.emit(
                 "No PCSC readers found.\n"
                 "Make sure pcscd is running: sudo systemctl start pcscd"
@@ -1413,50 +1334,20 @@ class PivWorker(QObject):
             ("NDEF",                          [0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01]),
         ]
 
-        try:
-            from smartcard.CardConnection import CardConnection as _CC
-            protocols = [("T=1", _CC.T1_protocol), ("auto", None)]
-        except Exception:
-            protocols = [("auto", None)]
+        lines = [f"PCSC diagnostic — {len(reader_names)} reader(s) found\n"]
 
-        lines = [f"PCSC diagnostic — {len(reader_list)} reader(s) found\n"]
-
-        for reader in reader_list:
-            lines.append(f"Reader: {reader}")
-            connected = False
-            conn = None
-            for proto_name, proto in protocols:
-                try:
-                    conn = reader.createConnection()
-                    if proto is not None:
-                        conn.connect(proto)
-                    else:
-                        conn.connect()
-                    lines.append(f"  Protocol: {proto_name} — connected")
-                    connected = True
-                    break
-                except Exception as e:
-                    lines.append(f"  Protocol: {proto_name} — failed ({e})")
-                    conn = None
-
-            if not connected:
-                lines.append("  Could not connect to reader")
-                continue
-
+        for connection in iter_pcsc_connections():
+            lines.append(f"Reader: {connection.reader_name} (connected)")
             for app_name, aid_bytes in KNOWN_AIDS:
                 # Always send Case 4 (with Le=0x00) — this is what solo2-cli uses
                 select_cmd = [0x00, INS_SELECT, 0x04, 0x00, len(aid_bytes)] + aid_bytes + [0x00]
                 try:
-                    _resp, sw1, sw2 = conn.transmit(select_cmd)
+                    _resp, sw1, sw2 = connection.transmit(select_cmd)
                     status = "OK" if sw1 == 0x90 else ("FCI pending" if sw1 == 0x61 else "not found" if (sw1 == 0x6A and sw2 == 0x82) else "error")
                     lines.append(f"  SELECT {app_name}: SW={sw1:02X}{sw2:02X} ({status})")
                 except Exception as e:
                     lines.append(f"  SELECT {app_name}: exception — {e}")
-
-            try:
-                conn.disconnect()
-            except Exception:
-                pass
+            connection.close()
 
         self.diagnose_result.emit("\n".join(lines))
 
