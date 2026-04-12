@@ -335,9 +335,7 @@ class OverviewTab(QWidget):
         self._set_busy(False)
         self._log_area.appendPlainText(message)
         self._post_flash_setup()
-        if success:
-            QMessageBox.information(self, "Update Complete", message)
-        else:
+        if not success:
             QMessageBox.critical(self, "Update Failed", message)
 
     def _on_firmware_error(self, error: str) -> None:
