@@ -12,7 +12,8 @@ case "$1" in
             --requirement "${REQUIREMENTS}" \
             --prefer-binary \
             --no-compile \
-            --quiet
+            --quiet \
+            --root-user-action=ignore
         find "${SITE_PACKAGES}" \
             -type d \( -name "__pycache__" -o -name "tests" -o -name "test" \) \
             -prune -exec rm -rf {} +
