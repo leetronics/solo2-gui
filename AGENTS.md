@@ -160,7 +160,59 @@ These files re-export solo2 types and are **not** violations:
 
 ---
 
-## 7  PR / AI-agent checklist
+## 7  Linux packaging model
+
+### Python dependency strategy
+
+The `.deb` and `.rpm` packages do **not** list Python libraries as distro
+dependencies (except PySide6, which is too large to bundle and is stable in
+Ubuntu 22.04+). Instead, all other Python deps are installed at package
+install time via pip into the app's private directory.
+
+| Package | Why handled this way |
+|---------|----------------------|
+| `PySide6` | ~150 MB; kept as distro dep (`python3-pyside6.*`) |
+| `fido2`, `requests`, `pyusb`, `qtawesome` | Pure-Python or abi3 wheels; installed via pip postinst |
+| `pyscard`, `hidapi` | Per-Python-version C extensions; installed via pip postinst so the correct ABI wheel is fetched for the user's actual Python |
+
+### `packaging/linux/requirements-bundled.txt`
+
+Single source of truth for the bundled deps and their version lower bounds
+(kept in sync with `pyproject.toml`). This file is shipped inside the package
+at `/usr/lib/solokeys-gui/requirements-bundled.txt`.
+
+**When you bump a dep version in `pyproject.toml`, also update this file.**
+
+### Install-time pip step
+
+`postinst` (deb) / `%post` (rpm) run:
+```sh
+python3 -m pip install \
+    --target /usr/lib/solokeys-gui/site-packages \
+    --requirement /usr/lib/solokeys-gui/requirements-bundled.txt \
+    --prefer-binary --no-compile --quiet
+```
+
+The wrapper scripts (`/usr/bin/solokeys-gui`, `/usr/bin/solokeys-secrets-host`)
+prepend `site-packages` to `PYTHONPATH` so bundled packages take precedence over
+any stale system-installed versions.
+
+### Python upgrade trigger
+
+If the user upgrades Python (e.g. 3.12 → 3.13), the C extension wheels need to
+be re-fetched for the new ABI.
+
+- **deb**: `packaging/linux/debian/triggers` declares `interest-noawait /usr/bin/python3`.
+  dpkg calls `postinst triggered` automatically after any `python3` package update.
+- **rpm**: `%triggerin -- python3` scriptlet in `solokeys-gui.spec.in` fires on
+  any `python3` install or upgrade.
+
+Both re-run the same pip install command so the correct wheel for the new Python
+version is installed. No manual intervention required.
+
+---
+
+## 8  PR / AI-agent checklist
 
 Before merging any change to `src/solo_gui/`, verify:
 
