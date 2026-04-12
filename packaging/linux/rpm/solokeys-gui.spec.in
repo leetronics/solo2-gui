@@ -9,14 +9,9 @@ URL:            https://github.com/leetronics/solo2-gui
 BuildArch:      @RPM_ARCH@
 Source0:        @RPM_SOURCE_NAME@
 Requires:       /usr/bin/python3
+Requires:       python3-pip
 Requires:       libusb1
-Requires:       python3dist(fido2)
 Requires:       python3dist(pyside6)
-Requires:       python3dist(pyusb)
-Requires:       python3dist(qtawesome)
-Requires:       python3dist(requests)
-Requires:       python3dist(hidapi)
-Requires:       python3dist(pyscard)
 Recommends:     pcsc-lite
 
 %description
@@ -38,6 +33,19 @@ mkdir -p %{buildroot}
 cp -a %{_builddir}/payload/. %{buildroot}/
 
 %post
+SITE_PACKAGES="/usr/lib/solokeys-gui/site-packages"
+REQUIREMENTS="/usr/lib/solokeys-gui/requirements-bundled.txt"
+python3 -m pip install \
+    --target "${SITE_PACKAGES}" \
+    --requirement "${REQUIREMENTS}" \
+    --prefer-binary \
+    --no-compile \
+    --quiet
+find "${SITE_PACKAGES}" \
+    -type d \( -name "__pycache__" -o -name "tests" -o -name "test" \) \
+    -prune -exec rm -rf {} +
+find "${SITE_PACKAGES}" -type f -name "*.pyc" -delete
+
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi
@@ -50,6 +58,10 @@ if command -v udevadm >/dev/null 2>&1; then
 fi
 
 %postun
+if [ $1 -eq 0 ]; then
+    rm -rf /usr/lib/solokeys-gui/site-packages
+fi
+
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi

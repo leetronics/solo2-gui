@@ -1,6 +1,25 @@
 #!/bin/sh
 set -e
 
+# Install Python dependencies into the app's private site-packages so the
+# correct wheel ABI for the user's Python version is always used.
+SITE_PACKAGES="/usr/lib/solokeys-gui/site-packages"
+REQUIREMENTS="/usr/lib/solokeys-gui/requirements-bundled.txt"
+case "$1" in
+    configure|upgrade)
+        python3 -m pip install \
+            --target "${SITE_PACKAGES}" \
+            --requirement "${REQUIREMENTS}" \
+            --prefer-binary \
+            --no-compile \
+            --quiet
+        find "${SITE_PACKAGES}" \
+            -type d \( -name "__pycache__" -o -name "tests" -o -name "test" \) \
+            -prune -exec rm -rf {} +
+        find "${SITE_PACKAGES}" -type f -name "*.pyc" -delete
+        ;;
+esac
+
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi

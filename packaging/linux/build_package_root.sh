@@ -78,6 +78,9 @@ linux_pkg_prepare_root() {
     find "${pkg_root}${INSTALL_LIBDIR}" -type d -name "__pycache__" -prune -exec rm -rf {} +
     find "${pkg_root}${INSTALL_LIBDIR}" -type f -name "*.pyc" -delete
 
+    install -m 0644 "${SCRIPT_DIR}/requirements-bundled.txt" \
+        "${pkg_root}${INSTALL_LIBDIR}/requirements-bundled.txt"
+
     rm -f "${pkg_root}${INSTALL_LIBDIR}/solo_gui/debug.txt"
     rm -f "${pkg_root}${INSTALL_LIBDIR}/solo_gui/solokeys_secrets_host.sh"
 

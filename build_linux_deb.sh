@@ -58,7 +58,7 @@ Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: SoloKeys GUI Team
 Installed-Size: ${INSTALLED_SIZE}
-Depends: python3 (>= 3.10), libusb-1.0-0, python3-fido2, python3-pyside6.qtcore, python3-pyside6.qtgui, python3-pyside6.qtwidgets, python3-qtawesome, python3-requests, python3-usb, python3-hidapi, python3-pyscard
+Depends: python3 (>= 3.10), python3-pip, libusb-1.0-0, python3-pyside6.qtcore, python3-pyside6.qtgui, python3-pyside6.qtwidgets
 Recommends: pcscd
 Description: Desktop GUI for managing Solo 2 devices
  Manage your Solo 2 device, FIDO2 resident credentials, Secrets/TOTP entries,
