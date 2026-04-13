@@ -713,6 +713,25 @@ class DeviceManager(QObject):
             self._credman = None
             _log.debug("_do_set_pin: OK")
             request.callback(True, None)
+        except OSError as e:
+            # Stale HID handle (e.g. WinError 1167) — reopen and retry once.
+            _log.debug("_do_set_pin: OSError, retrying: %s", e)
+            self._client_pin = None
+            if self._reopen_device():
+                try:
+                    self._client_pin = ClientPin(self._ctap2)
+                    self._client_pin.set_pin(new_pin)
+                    self._cached_pin = None
+                    self._client_pin = None
+                    self._pin_token = None
+                    self._credman = None
+                    request.callback(True, None)
+                    return
+                except Exception as e2:
+                    _log.debug("_do_set_pin: retry failed: %s", e2)
+                    request.callback(False, str(e2))
+                    return
+            request.callback(False, str(e))
         except Exception as e:
             _log.debug("_do_set_pin: exception: %s", e)
             request.callback(False, str(e))
@@ -760,11 +779,11 @@ class DeviceManager(QObject):
         """Execute CHANGE_PIN request."""
         current_pin = request.args.get('current_pin')
         new_pin = request.args.get('new_pin')
-        
+
         if not self._ensure_device():
             request.callback(None, "Device not connected")
             return
-        
+
         try:
             if self._client_pin is None:
                 self._client_pin = ClientPin(self._ctap2)
@@ -774,6 +793,23 @@ class DeviceManager(QObject):
             self._pin_token = None
             self._credman = None
             request.callback(True, None)
+        except OSError as e:
+            _log.debug("_do_change_pin: OSError, retrying: %s", e)
+            self._client_pin = None
+            if self._reopen_device():
+                try:
+                    self._client_pin = ClientPin(self._ctap2)
+                    self._client_pin.change_pin(current_pin, new_pin)
+                    self._cached_pin = new_pin
+                    self._client_pin = None
+                    self._pin_token = None
+                    self._credman = None
+                    request.callback(True, None)
+                    return
+                except Exception as e2:
+                    request.callback(False, str(e2))
+                    return
+            request.callback(False, str(e))
         except Exception as e:
             request.callback(False, str(e))
     
