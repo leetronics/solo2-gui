@@ -100,6 +100,10 @@ Main thread (Qt event loop)
 - Only `DeviceManager` may call `DeviceManager.get_pin_retries()`,
   `set_pin()`, `change_pin()`, `get_credentials()` etc.
 - Views read only cached/already-computed data (no blocking I/O on main thread).
+- Background threads must **never** open HID device handles on Windows (see §8).
+  Use `list_presence_ids()` for presence checks, not fido2 enumeration.
+- Tab `set_device()` methods must **not** send APDUs. Use a separate `load_data()`
+  method triggered after the required applet has been selected (see §8 HmacTab).
 
 ---
 
@@ -266,6 +270,17 @@ OATH). `HmacTab` sets up the worker in `set_device()` but waits for
 `VaultTab._on_status_checked()` to call `hmac_tab.load_data()`. Sending
 INS_LIST before SELECT → 0x6d00 on any platform.
 
+### Common pitfalls (quick reference)
+
+| Symptom | Root cause | Rule |
+|---------|-----------|------|
+| 0x6d00 APDU errors, device LED blinking | Background thread opens HID handles (fido2 enumeration) while CTAP session is active | Never use `DeviceWatcher`/fido2 HID enum on Windows; use `list_presence_ids()` |
+| 0x6d00 on tab load | APDU sent before applet SELECT | Tab `set_device()` must not send APDUs; defer to `load_data()` after applet selection |
+| `WinError 1167` / `OSError` on PIN ops | Stale HID handle after concurrent access | `_do_*` handlers must catch `OSError`, call `_reopen_device()`, retry once |
+| Device unplug not detected on Windows | USBMonitor disabled or using wrong backend | USBMonitor must run on Windows with `list_presence_ids()` backend |
+| Spurious disconnect/reconnect on Windows | Discovery poll transiently fails | Use `_disconnect_grace_scans = 3` on Windows (consecutive misses before disconnect) |
+| Device reconnect missed on Windows | USB arrival event fires before new mode is discoverable | `_on_usb_device_connected` must trigger delayed re-scans (750 ms + 1500 ms) |
+
 ---
 
 ## 9  PR / AI-agent checklist
@@ -292,3 +307,21 @@ Additional checks:
 - [ ] PIN operations go through `DeviceManager`, not raw `ClientPin`.
 - [ ] Device discovery goes through `DeviceMonitor` or `solo2.discovery`, not pyusb.
 - [ ] PC/SC connections use `iter_pcsc_connections()` from `solo2.pcsc`.
+
+### Windows / cross-platform checks
+
+- [ ] No code opens HID device handles in a background thread (causes CTAP session
+      conflicts on Windows). Use `list_presence_ids()` for presence detection.
+- [ ] `USBMonitor` changes preserve the platform split: `DeviceWatcher` on
+      Linux/macOS, `list_presence_ids()` on Windows. Never use fido2 HID
+      enumeration on Windows.
+- [ ] Tab `set_device()` does not send APDUs. Applet selection must happen first
+      (e.g. VaultTab sends SELECT OATH before HmacTab can send INS_LIST).
+- [ ] New `DeviceManager._do_*` handlers catch `OSError` and retry after
+      `_reopen_device()` (Windows stale HID handle pattern, see §8).
+- [ ] `DeviceMonitor` disconnect detection uses grace period on Windows
+      (`_disconnect_grace_scans = 3`) — do not reduce without testing.
+- [ ] `_on_usb_device_connected` triggers `_scan_devices()` with delayed retries
+      (750 ms, 1500 ms) — Windows USB arrival fires before mode is discoverable.
+- [ ] If bumping a dep version in `pyproject.toml`, also update
+      `packaging/linux/requirements-bundled.txt` (see §7).
