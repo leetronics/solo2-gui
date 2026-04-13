@@ -172,21 +172,17 @@ class DeviceMonitor(QObject):
 
     def start_monitoring(self) -> None:
         """Start monitoring for device changes."""
-        if sys.platform != "win32":
-            # On Linux/macOS the fido2 HID enumeration is lightweight (reads
-            # /dev/hidraw* without opening devices).  USBMonitor provides
-            # faster hot-plug detection than the 1 s poll timer alone.
-            self._usb_monitor = USBMonitor(
-                vid=Solo2Device.SOLOKEYS_VID,
-                pids=[Solo2Device.REGULAR_PID, Solo2Device.BOOTLOADER_PID],
-            )
-            self._usb_monitor.device_connected.connect(self._on_usb_device_connected)
-            self._usb_monitor.device_disconnected.connect(self._on_usb_device_disconnected)
-            self._usb_monitor.start()
-        # On Windows, skip USBMonitor: fido2's HID enumeration opens device
-        # handles which conflicts with active CTAP sessions, causing APDU
-        # errors and spurious disconnect/reconnect cycles.  The 1 s poll
-        # timer is sufficient.
+        # USBMonitor provides faster hot-plug detection than the 1 s poll
+        # timer alone.  On Windows it uses lightweight hidapi presence
+        # checks (no HID data handles); on Linux/macOS it uses the full
+        # DeviceWatcher (fido2 enumeration is lightweight there).
+        self._usb_monitor = USBMonitor(
+            vid=Solo2Device.SOLOKEYS_VID,
+            pids=[Solo2Device.REGULAR_PID, Solo2Device.BOOTLOADER_PID],
+        )
+        self._usb_monitor.device_connected.connect(self._on_usb_device_connected)
+        self._usb_monitor.device_disconnected.connect(self._on_usb_device_disconnected)
+        self._usb_monitor.start()
 
         # Initial scan, then keep polling every second on the main thread
         self._scan_devices()

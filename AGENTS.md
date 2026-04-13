@@ -214,27 +214,38 @@ version is installed. No manual intervention required.
 
 ## 8  Windows-specific device handling
 
-### USBMonitor is disabled on Windows
+### USBMonitor platform strategy
 
-`USBMonitor` (in `utils/usb_monitor.py`) uses `solo2.discovery.DeviceWatcher` which
-calls fido2's `list_descriptors()` every 0.5 s in a background thread. On Windows,
-fido2's HID enumeration **opens device handles**, which conflicts with the active
-CTAP2 session held by `DeviceManager`. This caused:
+`USBMonitor` (in `utils/usb_monitor.py`) runs on **all platforms** but uses a
+different backend depending on the OS:
+
+| Platform | Backend | Why |
+|----------|---------|-----|
+| Linux/macOS | `DeviceWatcher` (fido2 enumeration) | Reads `/dev/hidraw*` without opening devices — lightweight and safe |
+| Windows | `list_presence_ids()` (hidapi `hid.enumerate`) | Reads VID/PID/path via SetupAPI without opening a data connection |
+
+**Why not fido2 on Windows?** fido2's HID enumeration **opens device handles**,
+which conflicts with the active CTAP2 session held by `DeviceManager`. This caused:
 
 - APDU errors (0x6d00) from interrupted applet selection
 - Spurious disconnect/reconnect cycles
 - Constant device LED blinking
 
-On Linux/macOS the fido2 enumeration reads `/dev/hidraw*` without opening devices,
-so `USBMonitor` is safe there.
+**`list_presence_ids()`** (`solo2.discovery`) calls `hid.enumerate()` which uses
+SetupAPI/`HidD_GetAttributes` to read device info without opening data connections.
+It returns device IDs in the same `hid:{path!r}` format as `list_regular_descriptors()`.
 
-**Fix** (`models/device_monitor.py`): `start_monitoring()` skips `USBMonitor` on
-`sys.platform == "win32"`. The 1 s `QTimer` poll in `DeviceMonitor` provides
-device discovery on Windows (detection delay: ≤1 s instead of ≤0.5 s).
+**Detection flow on Windows:**
+1. `USBMonitor` polls `list_presence_ids()` every 0.5 s in a background thread
+2. On connect: emits `device_connected` → `DeviceMonitor._on_usb_device_connected()`
+   triggers `_scan_devices()` (full discovery) immediately + delayed retries at 750 ms
+   and 1500 ms (Windows can emit USB arrival before the new mode is fully discoverable)
+3. On disconnect: emits `device_disconnected` → if the device_id matches a tracked
+   device, immediate disconnect; otherwise the 1 s poll timer with grace period handles it
+4. The 1 s `QTimer` in `DeviceMonitor` runs as a fallback on all platforms
 
-**Do not re-enable `USBMonitor` on Windows** without first adding a lightweight
-presence-check to `solo2-python` that does not open HID handles (e.g. a
-`usb.core.find()` wrapper or SetupAPI-only scan).
+**Do not replace the Windows backend with fido2 enumeration** unless fido2 adds a
+lightweight presence-check mode that does not open HID handles.
 
 ### Stale HID handle retry
 

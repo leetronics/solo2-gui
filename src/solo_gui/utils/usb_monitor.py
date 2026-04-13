@@ -1,17 +1,23 @@
 """USB device monitoring for SoloKeys GUI."""
 
+import sys
 import threading
 import time
 
 from PySide6.QtCore import QObject, Signal
 
-from solo2.discovery import DeviceWatcher
+from solo2.discovery import DeviceWatcher, list_presence_ids
 
 
 class USBMonitor(QObject):
-    """Monitors SoloKeys device hot-plug events via solo2.discovery.DeviceWatcher.
+    """Monitors SoloKeys device hot-plug events.
 
-    Signals carry a stable device_id string (e.g. 'uuid:…' or 'hid:…').
+    On Linux/macOS uses ``DeviceWatcher`` (fido2 HID enumeration is lightweight).
+    On Windows uses ``list_presence_ids()`` (hidapi ``hid.enumerate``) which reads
+    VID/PID/path via SetupAPI without opening a data connection — safe to call
+    while a CTAP session is active on the same device.
+
+    Signals carry a stable device_id string (e.g. 'hid:…').
     The bus/address integers are kept for API compatibility but are always 0.
     """
 
@@ -38,7 +44,13 @@ class USBMonitor(QObject):
             self._thread.join(timeout=1.0)
 
     def _monitor_loop(self) -> None:
-        """Main monitoring loop using DeviceWatcher."""
+        if sys.platform == "win32":
+            self._monitor_loop_presence()
+        else:
+            self._monitor_loop_watcher()
+
+    def _monitor_loop_watcher(self) -> None:
+        """Linux/macOS: use DeviceWatcher (full descriptors, lightweight on these platforms)."""
         watcher = DeviceWatcher()
         while self._running:
             try:
@@ -47,6 +59,25 @@ class USBMonitor(QObject):
                     self.device_connected.emit(desc.id, 0, 0)
                 for desc in removed:
                     self.device_disconnected.emit(desc.id, 0, 0)
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    def _monitor_loop_presence(self) -> None:
+        """Windows: use lightweight hidapi presence check (no HID data handles)."""
+        previous: set[str] = set()
+        try:
+            previous = list_presence_ids()
+        except Exception:
+            pass
+        while self._running:
+            try:
+                current = list_presence_ids()
+                for device_id in current - previous:
+                    self.device_connected.emit(device_id, 0, 0)
+                for device_id in previous - current:
+                    self.device_disconnected.emit(device_id, 0, 0)
+                previous = current
             except Exception:
                 pass
             time.sleep(0.5)
