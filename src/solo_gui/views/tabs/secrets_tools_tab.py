@@ -195,6 +195,16 @@ class HmacTab(QWidget):
             lambda: self._set_busy(False, "Touch the device, then retry.")
         )
         self._worker.error_occurred.connect(self._on_error)
+        # Don't load immediately — vault_tab calls load_data() after
+        # check_status() confirms the Secrets App is available (and the
+        # OATH applet has been selected).
+        self._set_busy(True, "Waiting for Vault status check...")
+
+    def load_data(self) -> None:
+        """Load HMAC slot data.  Called by VaultTab after check_status()
+        confirms the Secrets App is present and the OATH applet is selected."""
+        if not self._worker:
+            return
         self._set_busy(True, "Loading HMAC slot status...")
         self._worker.load_hmac_slots()
 

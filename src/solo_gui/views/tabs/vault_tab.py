@@ -1059,10 +1059,12 @@ class VaultTab(QWidget):
                 self._change_pin_button.setVisible(False)
 
             self._refresh_credentials()
+            self._hmac_tab.load_data()
         else:
             self._status_label.setText("Secrets App not available")
             self._status_label.setStyleSheet("color: gray;")
             self._pin_status_label.setText("")
+            self._hmac_tab._set_busy(False, "Secrets App not available")
 
     def _show_firmware_info(self) -> None:
         """Show firmware extension requirements."""
@@ -1189,6 +1191,7 @@ class VaultTab(QWidget):
     def _on_error(self, error: str) -> None:
         """Handle worker error."""
         self._set_busy(False)
+        self._hmac_tab._set_busy(False, "")
         self._pending_password_action = None
         QMessageBox.critical(self, "Error", error)
 
