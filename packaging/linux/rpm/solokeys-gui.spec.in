@@ -18,7 +18,7 @@ Recommends:     pcsc-lite
 Manage your Solo 2 device, FIDO2 resident credentials, Secrets/TOTP entries,
 firmware updates, admin features and browser integration from a desktop GUI.
 
-This package installs the Chrome/Chromium native messaging host system-wide,
+This package installs the Chrome/Chromium and Firefox native messaging hosts system-wide,
 adds a desktop launcher and ships udev rules for SoloKeys HID access.
 
 %prep
@@ -100,6 +100,8 @@ fi
 /etc/opt/chrome/native-messaging-hosts/com.solokeys.secrets.json
 /etc/chromium/native-messaging-hosts/com.solokeys.secrets.json
 /etc/chromium-browser/native-messaging-hosts/com.solokeys.secrets.json
+/usr/lib/mozilla/native-messaging-hosts/com.solokeys.secrets.json
+/usr/lib64/mozilla/native-messaging-hosts/com.solokeys.secrets.json
 /lib/udev/rules.d/70-solokeys.rules
 
 %changelog

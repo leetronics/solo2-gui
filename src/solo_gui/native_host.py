@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SoloKeys Secrets Chrome Extension - Native Messaging Host
+SoloKeys Vault Browser Extension - Native Messaging Host
 
 Hybrid bridge: tries the solokeys-gui Unix socket first (path 1), then falls
 back to direct fido2 HID access (path 2) if the GUI is not running.

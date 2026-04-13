@@ -1,4 +1,4 @@
-"""IPC server that lets the Chrome extension native-messaging bridge talk to solokeys-gui.
+"""IPC server that lets the browser extension native-messaging bridge talk to solokeys-gui.
 
 Uses platform-native local IPC:
   Linux  : AF_UNIX socket at ~/.local/share/solokeys-gui/secrets.sock
@@ -6,7 +6,7 @@ Uses platform-native local IPC:
   Windows: named pipe at \\\\.\\pipe\\solokeys-secrets
 
 The accept loop runs in a daemon thread; each connection spawns its own thread.
-Security is enforced by Chrome via allowed_origins in the native messaging manifest
+Security is enforced by the browser-specific native messaging manifest
 — no additional pairing or client approval is required here.
 """
 
@@ -45,7 +45,7 @@ _PIPE_NAME = r"\\.\pipe\solokeys-secrets"
 
 
 class BrowserServer(QObject):
-    """Serves a local IPC endpoint for the Chrome extension native-messaging bridge."""
+    """Serves a local IPC endpoint for the browser extension native-messaging bridge."""
 
     # Emitted with an empty list (kept for settings_tab API compatibility)
     clients_changed = Signal(list)

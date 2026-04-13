@@ -159,9 +159,9 @@ class SettingsTab(QWidget):
         host_layout = QVBoxLayout(host_group)
 
         host_info = QLabel(
-            "The native messaging host allows the Chrome extension to access your SoloKeys "
-            "directly via HID. Source installs and unpackaged local runs register it per user account. "
-            "Linux system packages may install it system-wide."
+            "The native messaging host allows the SoloKeys Vault browser extension to access your "
+            "SoloKeys device from Chrome/Chromium and Firefox. Source installs and unpackaged local "
+            "runs register it per user account. Linux system packages may install it system-wide."
         )
         host_info.setWordWrap(True)
         host_layout.addWidget(host_info)
@@ -173,7 +173,7 @@ class SettingsTab(QWidget):
         host_layout.addLayout(status_row)
 
         btn_row = QHBoxLayout()
-        self._register_btn = QPushButton("Register with Chrome/Chromium")
+        self._register_btn = QPushButton("Register browsers")
         self._register_btn.clicked.connect(self._on_register_host)
         btn_row.addWidget(self._register_btn)
 
@@ -190,14 +190,15 @@ class SettingsTab(QWidget):
         install_layout = QVBoxLayout(install_group)
 
         install_info = QLabel(
-            "To use SoloKeys with your browser, install the official extension from the Chrome Web Store."
+            "To use SoloKeys Vault in your browser, install the Chrome build from the Chrome Web "
+            "Store or load the Firefox build from the generated package."
         )
         install_info.setWordWrap(True)
         install_layout.addWidget(install_info)
 
         store_link = QLabel(
             '<a href="https://chrome.google.com/webstore/detail/solokeys-totp/PLACEHOLDER_ID">'
-            'Install from Chrome Web Store</a>'
+            'Install Chrome build from Chrome Web Store</a>'
         )
         store_link.setOpenExternalLinks(True)
         store_link.setStyleSheet("color: #2196F3; font-weight: bold;")
@@ -211,37 +212,58 @@ class SettingsTab(QWidget):
         return widget
 
     def _refresh_host_status(self) -> None:
-        scope = native_host_installer.registration_scope()
-        needs_repair = native_host_installer.needs_repair()
-        if scope == "system":
-            if needs_repair:
-                self._host_status_label.setText("⚠ System registration needs repair")
-                self._host_status_label.setStyleSheet("color: #c77d00; font-weight: bold;")
-                self._register_btn.setText("Repair browser host registration")
-                self._register_btn.setEnabled(True)
+        statuses = native_host_installer.registration_statuses()
+        lines = []
+        any_missing = False
+        any_repair = False
+        any_user_scope = False
+        all_system = True
+
+        for browser_key in (native_host_installer.CHROMIUM, native_host_installer.FIREFOX):
+            status = statuses[browser_key]
+            label = status["label"]
+            scope = status["scope"]
+            repair = status["needs_repair"]
+
+            if repair:
+                lines.append(f"⚠ {label}: registration needs repair")
+                any_repair = True
+            elif scope == "system":
+                lines.append(f"✓ {label}: registered system-wide")
+            elif scope == "user":
+                lines.append(f"✓ {label}: registered")
+                any_user_scope = True
+                all_system = False
             else:
-                self._host_status_label.setText("✓ Registered system-wide")
-                self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
-                self._register_btn.setText("Managed by system package")
-                self._register_btn.setEnabled(False)
-            self._unregister_btn.setEnabled(False)
-        elif scope == "user":
-            if needs_repair:
-                self._host_status_label.setText("⚠ Registered, but points to a different host")
-                self._host_status_label.setStyleSheet("color: #c77d00; font-weight: bold;")
-                self._register_btn.setText("Repair browser host registration")
-            else:
-                self._host_status_label.setText("✓ Registered")
-                self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
-                self._register_btn.setText("Re-register")
+                lines.append(f"✗ {label}: not registered")
+                any_missing = True
+                all_system = False
+
+            if scope != "system":
+                all_system = False
+            if scope == "user":
+                any_user_scope = True
+
+        self._host_status_label.setText("\n".join(lines))
+
+        if any_repair:
+            self._host_status_label.setStyleSheet("color: #c77d00; font-weight: bold;")
+            self._register_btn.setText("Repair browser host registration")
             self._register_btn.setEnabled(True)
-            self._unregister_btn.setEnabled(True)
+        elif not any_missing and all_system:
+            self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._register_btn.setText("Managed by system package")
+            self._register_btn.setEnabled(False)
+        elif not any_missing:
+            self._host_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._register_btn.setText("Re-register browsers")
+            self._register_btn.setEnabled(True)
         else:
-            self._host_status_label.setText("✗ Not registered")
             self._host_status_label.setStyleSheet("color: red; font-weight: bold;")
-            self._register_btn.setText("Register with Chrome/Chromium")
+            self._register_btn.setText("Register browsers")
             self._register_btn.setEnabled(True)
-            self._unregister_btn.setEnabled(False)
+
+        self._unregister_btn.setEnabled(any_user_scope)
 
     def _on_register_host(self) -> None:
         success, msg = native_host_installer.install()

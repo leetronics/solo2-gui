@@ -10,7 +10,7 @@ Desktop GUI for managing Solo 2 devices across Linux, macOS, and Windows.
 - Manages TOTP / Secrets credentials, including touch- and PIN-protected entries
 - Exposes PIV and OpenPGP management flows when smartcard support is available
 - Includes admin and hardware-developer tabs for reboot, reset, provisioning, and attestation tasks
-- Registers a Chrome/Chromium native messaging host for browser-based TOTP integration
+- Registers Chrome/Chromium and Firefox native messaging hosts for browser-based Vault integration
 - Optional autostart on login
 
 ## Requirements
@@ -48,7 +48,7 @@ For Linux, the preferred end-user paths are native packages: `.deb` for Debian/U
 
 For everything else, run the application directly from a cloned repo.
 
-The packaged Linux artifacts install the desktop launcher, the Chrome/Chromium native messaging host and the SoloKeys udev rules system-wide.
+The packaged Linux artifacts install the desktop launcher, the Chrome/Chromium and Firefox native messaging hosts, and the SoloKeys udev rules system-wide.
 
 Install `libusb` and, if you want smartcard-backed features, `pcscd`. For source installs, building `pyscard` may also require the PC/SC development headers.
 
@@ -94,7 +94,7 @@ To install the packaged Debian/Ubuntu build:
 sudo apt install ./solokeys-gui_<version>_amd64.deb
 ```
 
-After installing the package, unplug and replug the SoloKey once so the fresh udev rules apply. Browser integration should already be registered system-wide for Chrome/Chromium.
+After installing the package, unplug and replug the SoloKey once so the fresh udev rules apply. Browser integration should already be registered system-wide for Chrome/Chromium and Firefox.
 
 To install the packaged RPM build on Fedora/openSUSE-style systems:
 
@@ -149,7 +149,7 @@ The build also creates an intermediate PyInstaller app folder in `dist\SoloKeys 
 
 ## Browser Integration
 
-The application can register a native messaging host named `com.solokeys.secrets` for Chrome/Chromium. When the app starts, it attempts to register the host automatically if it is missing, and the same action is available in `Settings -> Browser`.
+The application can register a native messaging host named `com.solokeys.secrets` for Chrome/Chromium and Firefox. When the app starts, it attempts to register the host automatically if it is missing or stale, and the same action is available in `Settings -> Browser`.
 
 Linux native packages install the native host manifests system-wide, so in-app registration is mainly relevant for source installs and other unpackaged local runs.
 

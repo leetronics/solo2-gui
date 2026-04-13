@@ -115,6 +115,15 @@ linux_pkg_prepare_root() {
             "${manifest_dir}/"
     done
 
+    for manifest_dir in \
+        "${pkg_root}/usr/lib/mozilla/native-messaging-hosts" \
+        "${pkg_root}/usr/lib64/mozilla/native-messaging-hosts"; do
+        install -d "${manifest_dir}"
+        install -m 0644 \
+            "${REPO_ROOT}/packaging/linux/native-messaging/com.solokeys.secrets.firefox.json" \
+            "${manifest_dir}/com.solokeys.secrets.json"
+    done
+
     install -d "${pkg_root}/lib/udev/rules.d"
     install -m 0644 "${REPO_ROOT}/packaging/linux/udev/70-solokeys.rules" \
         "${pkg_root}/lib/udev/rules.d/70-solokeys.rules"
