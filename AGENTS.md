@@ -212,7 +212,52 @@ version is installed. No manual intervention required.
 
 ---
 
-## 8  PR / AI-agent checklist
+## 8  Windows-specific device handling
+
+### USBMonitor is disabled on Windows
+
+`USBMonitor` (in `utils/usb_monitor.py`) uses `solo2.discovery.DeviceWatcher` which
+calls fido2's `list_descriptors()` every 0.5 s in a background thread. On Windows,
+fido2's HID enumeration **opens device handles**, which conflicts with the active
+CTAP2 session held by `DeviceManager`. This caused:
+
+- APDU errors (0x6d00) from interrupted applet selection
+- Spurious disconnect/reconnect cycles
+- Constant device LED blinking
+
+On Linux/macOS the fido2 enumeration reads `/dev/hidraw*` without opening devices,
+so `USBMonitor` is safe there.
+
+**Fix** (`models/device_monitor.py`): `start_monitoring()` skips `USBMonitor` on
+`sys.platform == "win32"`. The 1 s `QTimer` poll in `DeviceMonitor` provides
+device discovery on Windows (detection delay: ≤1 s instead of ≤0.5 s).
+
+**Do not re-enable `USBMonitor` on Windows** without first adding a lightweight
+presence-check to `solo2-python` that does not open HID handles (e.g. a
+`usb.core.find()` wrapper or SetupAPI-only scan).
+
+### Stale HID handle retry
+
+On Windows the CTAP2 HID handle can go stale (`OSError` / `WinError 1167`) if
+the 1 s discovery poll or vault APDU commands interfere with the session.
+`_ensure_device()` only checks `self._ctap2 is not None` — it does not verify
+the handle is alive.
+
+`_do_set_pin`, `_do_change_pin`, and `_do_browser_apdu` catch `OSError`, reopen
+the device via `_reopen_device()`, and retry once. If adding new `_do_*` handlers
+to `DeviceManager`, follow the same pattern.
+
+### HmacTab deferred loading
+
+`HmacTab.set_device()` must **not** send APDUs immediately. The OATH applet
+needs to be selected first by `VaultTab._check_status()` (which sends SELECT
+OATH). `HmacTab` sets up the worker in `set_device()` but waits for
+`VaultTab._on_status_checked()` to call `hmac_tab.load_data()`. Sending
+INS_LIST before SELECT → 0x6d00 on any platform.
+
+---
+
+## 9  PR / AI-agent checklist
 
 Before merging any change to `src/solo_gui/`, verify:
 
