@@ -180,9 +180,9 @@ def main() -> None:
     window = MainWindow(browser_server=browser_server)
     window.show()
 
-    # Silently register the native messaging host on first run (or if stale).
-    if not native_host_installer.is_registered():
-        QTimer.singleShot(500, _auto_register_host)
+    # Silently ensure browser host registration on startup.
+    # This is a no-op when Linux packages already installed valid system manifests.
+    QTimer.singleShot(500, _auto_register_host)
 
     import logging
 

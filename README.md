@@ -149,7 +149,7 @@ The build also creates an intermediate PyInstaller app folder in `dist\SoloKeys 
 
 ## Browser Integration
 
-The application can register a native messaging host named `com.solokeys.secrets` for Chrome/Chromium and Firefox. When the app starts, it attempts to register the host automatically if it is missing or stale, and the same action is available in `Settings -> Browser`.
+The application can register a native messaging host named `com.solokeys.secrets` for Chrome/Chromium and Firefox. On startup it automatically ensures that both browser registrations exist, repairs stale per-user registrations, and leaves valid system-wide Linux package registrations unchanged. The same action is available in `Settings -> Browser`.
 
 Linux native packages install the native host manifests system-wide, so in-app registration is mainly relevant for source installs and other unpackaged local runs.
 

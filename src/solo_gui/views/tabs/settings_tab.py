@@ -161,7 +161,8 @@ class SettingsTab(QWidget):
         host_info = QLabel(
             "The native messaging host allows the SoloKeys Vault browser extension to access your "
             "SoloKeys device from Chrome/Chromium and Firefox. Source installs and unpackaged local "
-            "runs register it per user account. Linux system packages may install it system-wide."
+            "runs register it per user account automatically on startup. Linux system packages may "
+            "install it system-wide, in which case the app leaves that registration alone."
         )
         host_info.setWordWrap(True)
         host_layout.addWidget(host_info)

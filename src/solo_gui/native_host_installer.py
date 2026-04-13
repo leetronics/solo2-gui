@@ -353,9 +353,11 @@ def install() -> tuple[bool, str]:
 
     for browser_key in BROWSER_KEYS:
         label = BROWSER_LABELS[browser_key]
+        system_scope = _has_valid_system_manifest(browser_key)
         scope = _registration_scope(browser_key)
+        repair = _needs_repair(browser_key)
 
-        if scope == "system":
+        if system_scope:
             try:
                 removed = _remove_user_manifest_overrides(browser_key)
                 if removed:
@@ -370,12 +372,19 @@ def install() -> tuple[bool, str]:
                 errors.append(f"{label}: could not repair conflicting per-user manifests: {exc}")
             continue
 
+        if scope == "user" and not repair:
+            messages.append(f"{label}: already registered.")
+            continue
+
         try:
             if sys.platform == "win32":
                 _install_windows(host_exe, browser_key)
             else:
                 _install_posix(host_exe, browser_key)
-            messages.append(f"{label}: registered native host.\nHost: {HOST_NAME}\nPath: {host_exe}")
+            if scope == "user":
+                messages.append(f"{label}: repaired native host registration.\nHost: {HOST_NAME}\nPath: {host_exe}")
+            else:
+                messages.append(f"{label}: registered native host.\nHost: {HOST_NAME}\nPath: {host_exe}")
         except Exception as exc:
             errors.append(f"{label}: registration failed: {exc}")
 
