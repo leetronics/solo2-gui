@@ -219,12 +219,12 @@ class CredentialCard(QFrame):
         if credential.is_otp:
             right.addWidget(self._gen_btn)
 
-        if credential.has_password_safe:
-            button_style = (
-                "QPushButton { color: #777; border: none; border-radius: 4px; }"
-                "QPushButton:hover { background: #eee; }"
-            )
+        button_style = (
+            "QPushButton { color: #777; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background: #eee; }"
+        )
 
+        if credential.has_password_safe:
             load_btn = QPushButton("\u21bb")
             load_btn.setFixedSize(28, 28)
             load_btn.setToolTip("Load password data")
@@ -246,12 +246,12 @@ class CredentialCard(QFrame):
             password_btn.clicked.connect(lambda: self.copy_password_requested.emit(self._credential))
             right.addWidget(password_btn)
 
-            edit_btn = QPushButton("\u270e")
-            edit_btn.setFixedSize(28, 28)
-            edit_btn.setToolTip("Edit password data")
-            edit_btn.setStyleSheet(button_style)
-            edit_btn.clicked.connect(lambda: self.edit_password_requested.emit(self._credential))
-            right.addWidget(edit_btn)
+        edit_btn = QPushButton("\u270e")
+        edit_btn.setFixedSize(28, 28)
+        edit_btn.setToolTip("Edit credential")
+        edit_btn.setStyleSheet(button_style)
+        edit_btn.clicked.connect(lambda: self.edit_password_requested.emit(self._credential))
+        right.addWidget(edit_btn)
 
         # Delete button
         del_btn = QPushButton("\u2715")
@@ -524,7 +524,7 @@ class AddCredentialDialog(QDialog):
 
 
 class EditPasswordDialog(QDialog):
-    """Edit password-safe fields for a credential."""
+    """Edit a credential's name and password-safe fields."""
 
     def __init__(self, credential: Credential, parent=None):
         super().__init__(parent)
@@ -536,6 +536,14 @@ class EditPasswordDialog(QDialog):
 
         self._name = QLineEdit(credential.name)
         form.addRow("Name:", self._name)
+
+        if credential.is_otp:
+            otp_info = QLabel(
+                f"{credential.kind_name} | {credential.algorithm_name} | "
+                f"{credential.digits} digits | {credential.period}s"
+            )
+            otp_info.setStyleSheet(f"color: {_get_card_colors()['secondary_text']};")
+            form.addRow("OTP Info:", otp_info)
 
         self._login = QLineEdit((credential.login or b"").decode("utf-8", errors="replace"))
         form.addRow("Login:", self._login)
@@ -878,10 +886,12 @@ class VaultTab(QWidget):
             self._worker.delete_credential(credential)
 
     def _load_password_for(self, credential: Credential, action: str = "load") -> None:
-        if not self._worker or not credential.has_password_safe:
+        if not self._worker:
+            return
+        if action != "edit" and not credential.has_password_safe:
             return
         self._pending_password_action = (credential.id, action)
-        self._set_busy(True, "Loading password data...")
+        self._set_busy(True, "Loading credential data..." if action == "edit" else "Loading password data...")
         self._worker.load_credential_data(credential)
 
     def _copy_login_for(self, credential: Credential) -> None:
