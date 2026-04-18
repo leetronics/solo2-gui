@@ -272,12 +272,6 @@ class GenerateKeyDialog(QDialog):
         self._algo_combo.addItem("ECC P-384", PivKeyType.ECC_P384)
         form_layout.addRow("Algorithm:", self._algo_combo)
 
-        # PIN input
-        self._pin_input = QLineEdit()
-        self._pin_input.setEchoMode(QLineEdit.Password)
-        self._pin_input.setPlaceholderText("default: 123456")
-        form_layout.addRow("PIN:", self._pin_input)
-
         # Management key input
         self._mgmt_key_input = QLineEdit()
         self._mgmt_key_input.setText(DEFAULT_MANAGEMENT_KEY)
@@ -310,9 +304,6 @@ class GenerateKeyDialog(QDialog):
 
     def get_key_type(self) -> PivKeyType:
         return self._algo_combo.currentData()
-
-    def get_pin(self) -> str:
-        return self._pin_input.text()
 
     def get_mgmt_key(self) -> str:
         return self._mgmt_key_input.text()
@@ -467,6 +458,7 @@ class SlotCard(QFrame):
         self._has_cert = has_cert
         key_type = slot_info.key_type_str
 
+        confirmed = slot_info.confirmed
         self._btn_generate.setText("Regenerate Key" if has_key else "Generate Key")
         self._btn_import.setText("Replace Cert" if has_cert else "Import Cert")
         self._btn_import.setEnabled(has_key)
@@ -479,11 +471,21 @@ class SlotCard(QFrame):
         self._btn_delete.setVisible(has_cert)
         self._apply_action_styles()
 
-        if not has_key and not has_cert:
+        if not has_key and not has_cert and not confirmed:
+            self._status_label.setText("- not probed")
+            self._status_label.setStyleSheet("color: #888; font-style: italic; font-size: 10pt;")
+            self._status_label.setToolTip(
+                "Slot state unknown. Use 'Verify PIN to Probe Keys' to check for existing keys."
+            )
+            self._hint_label.setText(
+                "Use Verify PIN to Probe Keys before generating — a key may already exist."
+            )
+            self._hint_label.setStyleSheet("color: #888; font-style: italic; font-size: 9pt;")
+        elif not has_key and not has_cert:
             self._status_label.setText("- empty")
             self._status_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 10pt;")
-            self._status_label.setToolTip("Generate a new device-resident key in this slot.")
-            self._hint_label.setText("Generate a key here, or use Verify PIN to Probe Keys if you expect one already exists.")
+            self._status_label.setToolTip("No key in this slot.")
+            self._hint_label.setText("Generate a new device-resident key in this slot.")
             self._hint_label.setStyleSheet(f"color: {colors['secondary_text']}; font-size: 9pt;")
         elif has_key and not has_cert:
             kt = key_type or "Key"
@@ -557,6 +559,7 @@ class PivTab(QWidget):
         self._last_generated_key_type: Optional[PivKeyType] = None
         self._controls_available = False
         self._reset_ready = False
+        self._tab_state = "loading"
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -584,10 +587,46 @@ class PivTab(QWidget):
             lib_warning_label.setStyleSheet(warning_style)
             layout.addWidget(lib_warning_label)
 
+        # --- PIN gate widget (shown until PIN is verified) ---
+        self._pin_gate_widget = QWidget()
+        gate_layout = QVBoxLayout(self._pin_gate_widget)
+        gate_layout.setContentsMargins(20, 20, 20, 20)
+        gate_layout.setSpacing(10)
+
+        gate_label = QLabel("Enter your PIV PIN to unlock key management")
+        gate_label.setStyleSheet("font-size: 13px; font-weight: bold;")
+        gate_layout.addWidget(gate_label)
+
+        gate_input_row = QHBoxLayout()
+        self._pin_gate_input = QLineEdit()
+        self._pin_gate_input.setEchoMode(QLineEdit.Password)
+        self._pin_gate_input.setPlaceholderText("PIV PIN")
+        self._pin_gate_input.setMaximumWidth(200)
+        self._pin_gate_input.returnPressed.connect(self._on_pin_gate_submit)
+        gate_input_row.addWidget(self._pin_gate_input)
+
+        self._pin_gate_button = QPushButton("Unlock")
+        self._pin_gate_button.clicked.connect(self._on_pin_gate_submit)
+        gate_input_row.addWidget(self._pin_gate_button)
+        gate_input_row.addStretch()
+        gate_layout.addLayout(gate_input_row)
+
+        self._pin_gate_error = QLabel("")
+        self._pin_gate_error.setStyleSheet("color: red; font-size: 11px;")
+        self._pin_gate_error.setWordWrap(True)
+        gate_layout.addWidget(self._pin_gate_error)
+
+        gate_hint = QLabel("Default PIN: 123456")
+        gate_hint.setStyleSheet("color: gray; font-size: 10px;")
+        gate_layout.addWidget(gate_hint)
+
+        gate_layout.addStretch()
+        layout.addWidget(self._pin_gate_widget, stretch=1)
+
         # --- Slot cards scroll area ---
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        self._slots_scroll = QScrollArea()
+        self._slots_scroll.setWidgetResizable(True)
+        self._slots_scroll.setFrameShape(QFrame.NoFrame)
 
         container = QWidget()
         vbox = QVBoxLayout(container)
@@ -604,8 +643,9 @@ class PivTab(QWidget):
             vbox.addWidget(card)
 
         vbox.addStretch()
-        scroll.setWidget(container)
-        layout.addWidget(scroll, stretch=1)
+        self._slots_scroll.setWidget(container)
+        self._slots_scroll.setVisible(False)
+        layout.addWidget(self._slots_scroll, stretch=1)
 
         # --- PIN Management group ---
         pin_group = QGroupBox("PIN Management")
@@ -649,20 +689,6 @@ class PivTab(QWidget):
         reset_hint.setWordWrap(True)
         reset_hint.setStyleSheet("color: gray; font-size: 10px;")
         pin_main.addWidget(reset_hint)
-
-        probe_hint = QLabel(
-            "If a slot still looks empty after reconnect, you can verify the PIN once to actively probe hidden keys."
-        )
-        probe_hint.setWordWrap(True)
-        probe_hint.setStyleSheet("color: gray; font-size: 10px;")
-        pin_main.addWidget(probe_hint)
-
-        self._probe_keys_button = QPushButton("Verify PIN to Probe Keys")
-        self._probe_keys_button.setToolTip(
-            "Use your PIN once to probe slots that do not expose reliable metadata after reconnect."
-        )
-        self._probe_keys_button.clicked.connect(self._probe_keys_with_pin)
-        pin_main.addWidget(self._probe_keys_button)
 
         # Danger zone sub-group
         danger_colors = _get_danger_zone_colors()
@@ -770,6 +796,10 @@ class PivTab(QWidget):
         self._puk_status_label.setText("Unknown")
         self._status_label.setText("No device connected")
         self._reset_ready = False
+        self._tab_state = "loading"
+        self._pin_gate_input.clear()
+        self._pin_gate_error.clear()
+        self._show_pin_gate()
         self._set_controls_enabled(False)
         self._pcsc_warning_label.setVisible(False)
 
@@ -866,6 +896,36 @@ class PivTab(QWidget):
             return
         self._set_session_key_cache(self._worker.get_key_cache())
 
+    def _show_pin_gate(self, error_msg: str = None) -> None:
+        """Show the PIN gate widget, hide slots scroll area."""
+        self._pin_gate_widget.setVisible(True)
+        self._slots_scroll.setVisible(False)
+        if error_msg:
+            self._pin_gate_error.setText(error_msg)
+        else:
+            self._pin_gate_error.clear()
+        if self._tab_state == "blocked":
+            self._pin_gate_input.setEnabled(False)
+            self._pin_gate_button.setEnabled(False)
+        else:
+            self._pin_gate_input.setEnabled(True)
+            self._pin_gate_button.setEnabled(True)
+
+    def _show_slots_view(self) -> None:
+        """Hide the PIN gate widget, show slots scroll area."""
+        self._pin_gate_widget.setVisible(False)
+        self._slots_scroll.setVisible(True)
+
+    def _on_pin_gate_submit(self) -> None:
+        """Handle the Unlock button click or Enter key in PIN gate."""
+        pin = self._pin_gate_input.text()
+        if not pin:
+            self._pin_gate_error.setText("Please enter your PIN.")
+            return
+        self._pin_gate_error.clear()
+        self._set_busy(True, "Verifying PIN and probing slots...")
+        self._worker.probe_slots_with_pin(pin)
+
     def _set_controls_enabled(self, enabled: bool) -> None:
         pcsc_enabled = enabled and PCSC_AVAILABLE
         self._controls_available = pcsc_enabled
@@ -874,7 +934,6 @@ class PivTab(QWidget):
         self._change_pin_button.setEnabled(pcsc_enabled)
         self._unblock_pin_button.setEnabled(pcsc_enabled)
         self._change_puk_button.setEnabled(pcsc_enabled)
-        self._probe_keys_button.setEnabled(pcsc_enabled)
         self._diagnose_button.setEnabled(pcsc_enabled)
         self._update_reset_visibility()
 
@@ -912,7 +971,7 @@ class PivTab(QWidget):
     def _update_pin_status(self) -> None:
         if not self._worker:
             return
-        self._worker.get_pin_status()
+        self._worker.check_pin_and_probe_slots()
 
     # ---- Signal handlers ----
 
@@ -921,7 +980,8 @@ class PivTab(QWidget):
         if available:
             self._pcsc_warning_label.setVisible(False)
             self._set_controls_enabled(True)
-            self._reload_slots()
+            self._tab_state = "loading"
+            self._set_busy(True, "Checking PIN status...")
             self._update_pin_status()
         else:
             self._set_controls_enabled(False)
@@ -1019,30 +1079,60 @@ class PivTab(QWidget):
                 self, "Error", f"Failed to export certificate: {error_or_path}"
             )
 
+    @staticmethod
+    def _format_pin_puk_status(status: dict, key: str) -> str:
+        """Format a PIN or PUK status dict entry for display."""
+        retries = status.get(f"{key}_retries")
+        st = status.get(f"{key}_status", "")
+        if st == "blocked":
+            return "Blocked (0 retries)"
+        if retries is not None:
+            return f"{retries} retries remaining"
+        if st == "verified":
+            return "Verified"
+        if st == "unavailable":
+            return "Not checkable"
+        if st == "not_initialized":
+            return "Not set"
+        if st and st.startswith("SW="):
+            return f"Not supported ({st})"
+        return "Status unknown"
+
     def _on_pin_status_updated(self, status: dict) -> None:
         if not status.get("pcsc_available", True):
+            self._set_busy(False)
             self._pin_status_label.setText("PCSC not available")
             self._puk_status_label.setText("PCSC not available")
             self._reset_ready = False
             self._update_reset_visibility()
             return
         if not status.get("connected", True):
+            self._set_busy(False)
             self._pin_status_label.setText("Not connected")
             self._puk_status_label.setText("Not connected")
             self._reset_ready = False
             self._update_reset_visibility()
             return
 
-        pin_retries = status.get("pin_retries")
-        puk_retries = status.get("puk_retries")
+        # PIN gate state transitions
+        pin_status = status.get("pin_status", "")
+        if self._tab_state in ("loading", "pin_required", "blocked"):
+            if pin_status == "verified":
+                # Worker will emit key_probe_completed after probing
+                # in the same PCSC session — don't transition yet.
+                pass
+            elif pin_status == "blocked":
+                self._set_busy(False)
+                self._tab_state = "blocked"
+                self._show_pin_gate("PIN is blocked. Use Unblock PIN or Reset PIV.")
+            elif pin_status in ("retries", "not_initialized"):
+                self._set_busy(False)
+                self._tab_state = "pin_required"
+                self._show_pin_gate()
 
-        self._pin_status_label.setText(
-            f"{pin_retries} retries remaining" if pin_retries is not None else "Status unknown"
-        )
-        self._puk_status_label.setText(
-            f"{puk_retries} retries remaining" if puk_retries is not None else "Status unknown"
-        )
-        self._update_reset_visibility(pin_retries, puk_retries)
+        self._pin_status_label.setText(self._format_pin_puk_status(status, "pin"))
+        self._puk_status_label.setText(self._format_pin_puk_status(status, "puk"))
+        self._update_reset_visibility(status.get("pin_retries"), status.get("puk_retries"))
 
     def _on_pin_changed(self, success: bool, message: str) -> None:
         self._set_busy(False)
@@ -1050,6 +1140,7 @@ class PivTab(QWidget):
             QMessageBox.information(
                 self, "Success", message if message else "Operation completed successfully"
             )
+            self._set_busy(True, "Refreshing PIN status...")
             self._update_pin_status()
         else:
             QMessageBox.critical(self, "Error", message)
@@ -1057,18 +1148,21 @@ class PivTab(QWidget):
     def _on_key_probe_completed(self, success: bool, message: str) -> None:
         self._set_busy(False)
         if success:
+            self._tab_state = "ready"
+            self._show_slots_view()
             self._status_label.setText(message or "PIN verified")
-            if message:
-                QMessageBox.information(self, "PIN Verified", message)
         else:
-            QMessageBox.critical(self, "PIN Verification Failed", message or "PIN verification failed")
+            self._pin_gate_error.setText(message or "PIN verification failed")
 
     def _on_reset_completed(self, success: bool, message: str) -> None:
         self._set_busy(False)
         if success:
             self._set_session_key_cache({})
             QMessageBox.information(self, "Reset Complete", message)
-            self._reload_slots()
+            self._tab_state = "loading"
+            self._pin_gate_input.clear()
+            self._pin_gate_error.clear()
+            self._set_busy(True, "Checking PIN status...")
             self._update_pin_status()
         else:
             error_msg = message
@@ -1122,7 +1216,7 @@ class PivTab(QWidget):
             self._set_busy(True, f"Generating key in {name} ({hex_id})...")
             self._worker.generate_key(
                 slot, dialog.get_key_type(),
-                dialog.get_pin() or None,
+                None,
                 dialog.get_mgmt_key(),
             )
 
@@ -1179,11 +1273,6 @@ class PivTab(QWidget):
             cred_layout.addWidget(info_label)
             form = QFormLayout()
 
-            pin_input = QLineEdit()
-            pin_input.setEchoMode(QLineEdit.Password)
-            pin_input.setPlaceholderText("optional")
-            form.addRow("PIN:", pin_input)
-
             mgmt_input = QLineEdit()
             mgmt_input.setText(DEFAULT_MANAGEMENT_KEY)
             form.addRow("Management Key:", mgmt_input)
@@ -1195,10 +1284,9 @@ class PivTab(QWidget):
             cred_layout.addWidget(buttons)
 
             if cred_dialog.exec() == QDialog.Accepted:
-                pin = pin_input.text()
                 self._set_busy(True, "Importing certificate...")
                 self._worker.import_certificate(
-                    slot, cert_data, pin if pin else None, mgmt_input.text()
+                    slot, cert_data, None, mgmt_input.text()
                 )
 
         except Exception as e:
@@ -1224,10 +1312,8 @@ class PivTab(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        dialog = PivPinDialog(self, "Enter PIN", show_current=True, show_new=False)
-        if dialog.exec() == QDialog.Accepted:
-            self._set_busy(True, "Deleting...")
-            self._worker.delete_certificate(slot, dialog.get_current())
+        self._set_busy(True, "Deleting...")
+        self._worker.delete_certificate(slot, None)
 
     # ---- PIN management handlers ----
 
@@ -1275,26 +1361,6 @@ class PivTab(QWidget):
             if current_puk and new_puk:
                 self._set_busy(True, "Changing PUK...")
                 self._worker.change_puk(current_puk, new_puk)
-
-    def _probe_keys_with_pin(self) -> None:
-        if not self._worker:
-            return
-        dialog = PivPinDialog(
-            self,
-            "Verify PIN to Probe Keys",
-            show_current=True,
-            show_new=False,
-            current_label="PIN:",
-        )
-        if dialog.exec() != QDialog.Accepted:
-            return
-
-        pin = dialog.get_current()
-        if not pin:
-            return
-
-        self._set_busy(True, "Verifying PIN and probing slots...")
-        self._worker.probe_slots_with_pin(pin)
 
     def _reset_piv(self) -> None:
         if not self._worker:

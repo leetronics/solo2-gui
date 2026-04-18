@@ -128,6 +128,7 @@ class SlotInfo:
     has_key: bool
     key_type_str: Optional[str]
     certificate: Optional[PivCertificate]
+    confirmed: bool = True  # False when metadata was unavailable and no probe done
 
 
 class PivWorker(QObject):
@@ -159,6 +160,8 @@ class PivWorker(QObject):
         self._connection = None
         self._selected = False
         self._key_cache = {}  # Session-local key hints after generate/import operations
+        self._pin_probed = False  # True after a successful PIN-verified probe
+        self._last_verify_retries = None  # Retries from last failed VERIFY
 
     def get_key_cache(self) -> Dict[PivSlot, dict]:
         """Return a shallow copy of the session-local key cache."""
@@ -421,19 +424,25 @@ class PivWorker(QObject):
         except Exception:
             return None
 
-    def _get_slot_metadata(self, slot: PivSlot) -> Tuple[bool, Optional[str]]:
-        """Return whether the slot exposes real metadata and, if known, its key type."""
+    def _get_slot_metadata(self, slot: PivSlot) -> Tuple[Optional[bool], Optional[str]]:
+        """Return (has_key, key_type_str) for a slot via GET METADATA.
+
+        has_key semantics:
+          None  — command failed or not supported; slot state is *unknown*
+          False — command succeeded and confirmed the slot is empty
+          True  — key is present
+        """
         if not self._connection:
-            return False, None
+            return None, None
 
         key_ref = KEY_REFERENCE.get(slot)
         if not key_ref:
-            return False, None
+            return None, None
 
         try:
             response, sw1, sw2 = self._transmit_with_get_response([0x00, 0xF7, 0x00, key_ref, 0x00])
             if sw1 != 0x90 or sw2 != 0x00:
-                return False, None
+                return None, None
             # On this firmware, empty slots can still return SW=9000 with an empty body.
             # Only treat the slot as populated when metadata TLVs are actually present.
             if not response:
@@ -452,11 +461,11 @@ class PivWorker(QObject):
             # algorithm/origin/public-key data.
             has_real_metadata = any(tag in tlvs for tag in (0x01, 0x03, 0x04))
             if not has_real_metadata:
-                return False, None
+                return None, None
 
             return True, self._key_type_from_metadata(response)
         except Exception:
-            return False, None
+            return None, None
 
     def _slot_has_key(self, slot: PivSlot) -> bool:
         """Return True when GET METADATA exposes actual key metadata in the slot."""
@@ -521,6 +530,16 @@ class PivWorker(QObject):
             metadata_key, metadata_key_type = self._get_slot_metadata(slot)
             has_key = bool(metadata_key or cert is not None or cached is not None)
 
+            # A slot is only confirmed when we have positive evidence:
+            # - a key was found (metadata=True, cert, or cache)
+            # - a PIN-verified sign probe was done (sets _pin_probed)
+            # GET METADATA returning SW=9000+empty does NOT confirm emptiness
+            # because this firmware returns that for all slots regardless.
+            confirmed = (
+                self._pin_probed
+                or has_key
+            )
+
             key_type_str = None
             if cached:
                 key_type_str = cached.get("algorithm")
@@ -529,7 +548,7 @@ class PivWorker(QObject):
             elif cert:
                 key_type_str = self._detect_key_type_from_cert(cert.certificate_der)
 
-            result.append(SlotInfo(slot, has_key, key_type_str, cert))
+            result.append(SlotInfo(slot, has_key, key_type_str, cert, confirmed))
         return result
 
     def _parse_certificate(self, data: bytes, slot: PivSlot) -> Optional[PivCertificate]:
@@ -715,6 +734,7 @@ class PivWorker(QObject):
 
     def load_slots(self) -> None:
         """Load combined key+cert state for all 4 PIV slots. Emits slots_loaded(list[SlotInfo])."""
+        self._pin_probed = False
         empty = [SlotInfo(s, False, None, None) for s in PivSlot]
 
         if not self.check_pcsc_available():
@@ -731,8 +751,58 @@ class PivWorker(QObject):
         finally:
             self._disconnect()
 
-    def probe_slots_with_pin(self, pin: str) -> None:
-        """Verify the PIN once and actively probe slots that do not expose metadata."""
+    def _do_slot_probing(self) -> Tuple[List[SlotInfo], int]:
+        """Probe all slots within the current open connection.
+
+        Assumes the connection is already open and PIN is verified.
+        Returns (slot_infos, discovered_count). Does NOT emit signals.
+        """
+        discovered = 0
+        for slot in PivSlot:
+            cert = None
+            tag = TAG_CERTIFICATE.get(slot)
+            if tag:
+                raw = self._get_data(tag)
+                if raw:
+                    cert = self._parse_certificate(raw, slot)
+            metadata_key, metadata_key_type = self._get_slot_metadata(slot)
+
+            # Skip sign probe only when we already know both presence AND type:
+            # either metadata gives complete info, or we can get type from the cert.
+            if metadata_key and metadata_key_type:
+                self._key_cache[slot] = {
+                    "key_type": None,
+                    "algorithm": metadata_key_type,
+                    "has_certificate": cert is not None,
+                }
+                continue
+            if cert is not None:
+                # Key type detectable from certificate public key
+                continue
+
+            # Probe needed: metadata unknown/empty, or key present but type
+            # unknown (e.g. slot 9E).
+            detected_key_type = self._probe_slot_with_verified_pin(slot)
+            if detected_key_type is None:
+                continue
+
+            discovered += 1
+            self._key_cache[slot] = {
+                "key_type": detected_key_type,
+                "algorithm": _KEY_TYPE_LABELS.get(detected_key_type, detected_key_type.value),
+                "has_certificate": False,
+            }
+
+        self._pin_probed = True
+        return self._collect_slot_infos(), discovered
+
+    def probe_slots_with_pin(self, pin: Optional[str] = None) -> None:
+        """Verify the PIN once and actively probe slots that do not expose metadata.
+
+        When *pin* is ``None`` the card is assumed to already have verified
+        PIN state (e.g. checked via a status query) and no VERIFY command is
+        sent — we go straight to slot probing.
+        """
         empty = [SlotInfo(s, False, None, None) for s in PivSlot]
 
         if not self.check_pcsc_available():
@@ -744,56 +814,90 @@ class PivWorker(QObject):
             return
 
         try:
-            pin_ok, pin_message = self._verify_pin_with_status(pin)
-            if not pin_ok:
-                self.key_probe_completed.emit(False, pin_message or "PIN verification failed")
-                return
+            if pin is not None:
+                pin_ok, pin_message = self._verify_pin_with_status(pin)
+                if not pin_ok:
+                    self.key_probe_completed.emit(False, pin_message or "PIN verification failed")
+                    return
 
-            discovered = 0
-            for slot in PivSlot:
-                cert = None
-                tag = TAG_CERTIFICATE.get(slot)
-                if tag:
-                    raw = self._get_data(tag)
-                    if raw:
-                        cert = self._parse_certificate(raw, slot)
-                metadata_key, metadata_key_type = self._get_slot_metadata(slot)
-                if metadata_key or cert is not None:
-                    if metadata_key and metadata_key_type:
-                        self._key_cache[slot] = {
-                            "key_type": None,
-                            "algorithm": metadata_key_type,
-                            "has_certificate": cert is not None,
-                        }
-                    continue
-
-                detected_key_type = self._probe_slot_with_verified_pin(slot)
-                if detected_key_type is None:
-                    continue
-
-                discovered += 1
-                self._key_cache[slot] = {
-                    "key_type": detected_key_type,
-                    "algorithm": _KEY_TYPE_LABELS.get(detected_key_type, detected_key_type.value),
-                    "has_certificate": False,
-                }
-
-            self.slots_loaded.emit(self._collect_slot_infos())
+            slot_infos, discovered = self._do_slot_probing()
+            self.slots_loaded.emit(slot_infos)
             if discovered:
                 noun = "slot" if discovered == 1 else "slots"
                 self.key_probe_completed.emit(
                     True,
-                    f"PIN verified. Detected additional private keys in {discovered} {noun}.",
+                    f"PIN verified. Detected private keys in {discovered} {noun}.",
                 )
             else:
                 self.key_probe_completed.emit(
                     True,
-                    "PIN verified. No additional hidden PIV keys were detected.",
+                    "PIN verified. All slot states confirmed.",
                 )
         except Exception as e:
             self.error_occurred.emit(f"Failed to probe slots with PIN: {e}")
             self.slots_loaded.emit(empty)
             self.key_probe_completed.emit(False, str(e))
+        finally:
+            self._disconnect()
+
+    def check_pin_and_probe_slots(self) -> None:
+        """Check PIN status; if verified, probe slots in the SAME session.
+
+        Emits pin_status_updated (always), then slots_loaded + key_probe_completed
+        (only when PIN is verified and probing happens).
+
+        This avoids the problem where separate PCSC sessions lose PIN-verified
+        state between the status check and slot probing.
+        """
+        empty = [SlotInfo(s, False, None, None) for s in PivSlot]
+
+        if not self.check_pcsc_available():
+            self.pin_status_updated.emit(
+                {"pcsc_available": False, "pin_retries": None, "puk_retries": None}
+            )
+            return
+
+        if not self._connect():
+            self.pin_status_updated.emit(
+                {"pcsc_available": True, "connected": False}
+            )
+            return
+
+        try:
+            # Step 1: check PIN (VERIFY with empty data — no retry decrement)
+            pin_info = self._check_retry_count(0x80)
+            status = {
+                "pcsc_available": True,
+                "connected": True,
+                "pin_retries": pin_info["retries"],
+                "pin_status": pin_info["status"],
+                "puk_retries": None,
+                "puk_status": "unavailable",
+            }
+            self.pin_status_updated.emit(status)
+
+            # Step 2: if verified, probe in the SAME session
+            if pin_info["status"] == "verified":
+                try:
+                    slot_infos, discovered = self._do_slot_probing()
+                    self.slots_loaded.emit(slot_infos)
+                    if discovered:
+                        noun = "slot" if discovered == 1 else "slots"
+                        self.key_probe_completed.emit(
+                            True,
+                            f"PIN verified. Detected private keys in {discovered} {noun}.",
+                        )
+                    else:
+                        self.key_probe_completed.emit(
+                            True,
+                            "PIN verified. All slot states confirmed.",
+                        )
+                except Exception as e:
+                    self.error_occurred.emit(f"Failed to probe slots: {e}")
+                    self.slots_loaded.emit(empty)
+                    self.key_probe_completed.emit(False, str(e))
+        except Exception as e:
+            self.error_occurred.emit(f"Failed to check PIN status: {e}")
         finally:
             self._disconnect()
 
@@ -840,8 +944,9 @@ class PivWorker(QObject):
 
             # Verify PIN (required for 9A/9C/9D slots)
             if pin and slot != PivSlot.CARD_AUTH:
-                if not self._verify_pin(pin):
-                    self.key_generated.emit(False, "PIN verification failed", b"", None)
+                pin_ok, pin_msg = self._verify_pin_with_status(pin)
+                if not pin_ok:
+                    self.key_generated.emit(False, pin_msg or "PIN verification failed", b"", None)
                     return
 
             key_ref = KEY_REFERENCE.get(slot)
@@ -1029,20 +1134,40 @@ class PivWorker(QObject):
         return success
 
     def _verify_pin_with_status(self, pin: str) -> Tuple[bool, str]:
-        """Verify the PIV PIN and return a user-facing status message on failure."""
+        """Verify the PIV PIN and return a user-facing status message on failure.
+
+        Always emits ``pin_status_updated`` so the UI stays in sync.
+        """
+        self._last_verify_retries = None
         pin_bytes = pin.encode("utf-8")
         # Pad to 8 bytes with 0xFF
         pin_data = list(pin_bytes) + [0xFF] * (8 - len(pin_bytes))
 
         response, sw1, sw2 = self._send_apdu(INS_VERIFY, 0x00, 0x80, pin_data)
         if sw1 == 0x90 and sw2 == 0x00:
+            self._emit_pin_status(None, "verified")
             return True, ""
         if sw1 == 0x63 and (sw2 & 0xF0) == 0xC0:
             retries = sw2 & 0x0F
+            self._last_verify_retries = retries
+            self._emit_pin_status(retries, "retries")
             return False, f"Incorrect PIN ({retries} retries remaining)"
         if sw1 == 0x69 and sw2 == 0x83:
+            self._last_verify_retries = 0
+            self._emit_pin_status(0, "blocked")
             return False, "PIN is blocked"
         return False, f"PIN verification failed: SW={sw1:02X}{sw2:02X}"
+
+    def _emit_pin_status(self, retries: Optional[int], status: str) -> None:
+        """Emit a pin_status_updated signal with the given PIN state."""
+        self.pin_status_updated.emit({
+            "pcsc_available": True,
+            "connected": True,
+            "pin_retries": retries,
+            "pin_status": status,
+            "puk_retries": None,
+            "puk_status": "unavailable",
+        })
 
     def _authenticate_management_key(self, mgmt_key_hex: str) -> bool:
         """Authenticate with the PIV management key (3DES challenge-response).
@@ -1144,6 +1269,32 @@ class PivWorker(QObject):
         else:
             return [0x82, (length >> 8) & 0xFF, length & 0xFF]
 
+    def _check_retry_count(self, p2: int) -> dict:
+        """Send VERIFY with no data to check retry count for a key reference.
+
+        Returns a dict with 'retries' (int or None) and 'status' (str).
+        PIV spec: VERIFY with no command data field returns the retry counter.
+        """
+        try:
+            # APDU: 00 20 00 <p2> — no Lc, no data, no Le
+            response, sw1, sw2 = self._send_apdu(INS_VERIFY, 0x00, p2, [])
+
+            if sw1 == 0x63 and (sw2 & 0xF0) == 0xC0:
+                return {"retries": sw2 & 0x0F, "status": "retries"}
+            if sw1 == 0x69 and sw2 == 0x83:
+                return {"retries": 0, "status": "blocked"}
+            if sw1 == 0x90 and sw2 == 0x00:
+                # 9000 means PIN is verified in the current session.
+                # The card keeps PIN-verified state while USB-powered,
+                # even across PCSC reconnects.
+                return {"retries": None, "status": "verified"}
+            # 6A 88 = reference data not found (PIN/PUK not initialised)
+            if sw1 == 0x6A and sw2 == 0x88:
+                return {"retries": None, "status": "not_initialized"}
+            return {"retries": None, "status": f"SW={sw1:02X}{sw2:02X}"}
+        except Exception:
+            return {"retries": None, "status": "error"}
+
     def get_pin_status(self) -> None:
         """Get current PIN status and retry counters."""
         if not self.check_pcsc_available():
@@ -1159,25 +1310,17 @@ class PivWorker(QObject):
             return
 
         try:
-            # Try to verify with empty PIN to get retry count
-            response, sw1, sw2 = self._send_apdu(INS_VERIFY, 0x00, 0x80, [])
-
-            pin_retries = None
-            if sw1 == 0x63 and (sw2 & 0xF0) == 0xC0:
-                pin_retries = sw2 & 0x0F
-
-            # Try PUK as well
-            response, sw1, sw2 = self._send_apdu(INS_VERIFY, 0x00, 0x81, [])
-
-            puk_retries = None
-            if sw1 == 0x63 and (sw2 & 0xF0) == 0xC0:
-                puk_retries = sw2 & 0x0F
+            pin_info = self._check_retry_count(0x80)  # PIV PIN
+            # PUK cannot be queried via VERIFY on this firmware (returns
+            # 6A88 / 6D00), so we report it as unavailable.
 
             status = {
                 "pcsc_available": True,
                 "connected": True,
-                "pin_retries": pin_retries,
-                "puk_retries": puk_retries,
+                "pin_retries": pin_info["retries"],
+                "pin_status": pin_info["status"],
+                "puk_retries": None,
+                "puk_status": "unavailable",
             }
 
             self.pin_status_updated.emit(status)
