@@ -164,6 +164,7 @@ class TotpWorker(QObject):
         login: Optional[str] = None,
         password: Optional[str] = None,
         metadata: Optional[str] = None,
+        touch_required: Optional[bool] = None,
     ) -> None:
         try:
             self._session.update_credential(
@@ -172,6 +173,7 @@ class TotpWorker(QObject):
                 login=login,
                 password=password,
                 metadata=metadata,
+                touch_required=touch_required,
             )
             self.credential_updated.emit(True, "")
         except Solo2PinRequiredError:

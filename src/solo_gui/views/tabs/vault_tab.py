@@ -524,7 +524,7 @@ class AddCredentialDialog(QDialog):
 
 
 class EditPasswordDialog(QDialog):
-    """Edit a credential's name and password-safe fields."""
+    """Edit a credential's name, touch setting, and password-safe fields."""
 
     def __init__(self, credential: Credential, parent=None):
         super().__init__(parent)
@@ -545,6 +545,12 @@ class EditPasswordDialog(QDialog):
             otp_info.setStyleSheet(f"color: {_get_card_colors()['secondary_text']};")
             form.addRow("OTP Info:", otp_info)
 
+        self._touch_required = QCheckBox(
+            "Require touch before use/generation" if credential.is_otp else "Require touch before use"
+        )
+        self._touch_required.setChecked(credential.touch_required)
+        form.addRow(self._touch_required)
+
         self._login = QLineEdit((credential.login or b"").decode("utf-8", errors="replace"))
         form.addRow("Login:", self._login)
 
@@ -562,12 +568,13 @@ class EditPasswordDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def values(self) -> tuple[str, str, str, str]:
+    def values(self) -> tuple[str, str, str, str, bool]:
         return (
             self._name.text().strip(),
             self._login.text(),
             self._password.text(),
             self._metadata.toPlainText(),
+            self._touch_required.isChecked(),
         )
 
 
@@ -1261,7 +1268,7 @@ class VaultTab(QWidget):
         dialog = EditPasswordDialog(credential, self)
         if dialog.exec() != QDialog.Accepted:
             return
-        name, login, password, metadata = dialog.values()
+        name, login, password, metadata, touch_required = dialog.values()
         self._set_busy(True, "Updating credential...")
         self._worker.update_credential_data(
             credential,
@@ -1273,4 +1280,5 @@ class VaultTab(QWidget):
             login=login,
             password=password,
             metadata=metadata,
+            touch_required=touch_required,
         )
