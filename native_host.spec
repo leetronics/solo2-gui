@@ -2,14 +2,16 @@
 #
 # PyInstaller spec for the SoloKeys Secrets native messaging host.
 #
-# Produces a single-file binary called 'solokeys-secrets-host' (or .exe on Windows).
-# This binary is placed alongside the main solokeys-gui executable and requires
-# no Python installation on the end user's machine.
+# Produces a native messaging host called 'solokeys-secrets-host' (or .exe on
+# Windows). Windows keeps the single-file binary. macOS uses onedir because the
+# onefile bootloader extracts Python.framework at runtime, which Gatekeeper can
+# block when Chrome launches the host.
 #
 # Build:
 #   pyinstaller native_host.spec
 #
-# The output lands in dist/solokeys-secrets-host[.exe].
+# The output lands in dist/solokeys-secrets-host[.exe] on Windows/Linux and
+# dist/solokeys-secrets-host/solokeys-secrets-host on macOS.
 
 import sys
 
@@ -66,24 +68,53 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='solokeys-secrets-host',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    # UPX can invalidate or complicate macOS code signing/notarization.
-    upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,   # must be console — Chrome reads stdout/stdin
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
+if sys.platform == 'darwin':
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name='solokeys-secrets-host',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,   # must be console — Chrome reads stdout/stdin
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )
+
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name='solokeys-secrets-host',
+    )
+
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name='solokeys-secrets-host',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=True,   # must be console — Chrome reads stdout/stdin
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )

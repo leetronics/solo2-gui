@@ -41,8 +41,10 @@ fi
 
 APP_VERSION="$(python3 scripts/app_version.py resolved)"
 DMG_NAME="SoloKeys-GUI-${APP_VERSION}.dmg"
-HOST_EXE="dist/solokeys-secrets-host"
-APP_HOST_EXE="dist/${APP_NAME}.app/Contents/MacOS/solokeys-secrets-host"
+HOST_DIR="dist/solokeys-secrets-host"
+HOST_EXE="${HOST_DIR}/solokeys-secrets-host"
+APP_HOST_DIR="dist/${APP_NAME}.app/Contents/MacOS/solokeys-secrets-host"
+APP_HOST_EXE="${APP_HOST_DIR}/solokeys-secrets-host"
 
 # ---------------------------------------------------------------------------
 # 2. Detect libusb
@@ -98,12 +100,13 @@ echo ""
 echo "Running PyInstaller for native host..."
 pyinstaller --clean --noconfirm native_host.spec
 
-if [[ ! -x "${HOST_EXE}" ]]; then
+if [[ ! -d "${HOST_DIR}" || ! -x "${HOST_EXE}" ]]; then
     echo "Error: PyInstaller did not produce executable ${HOST_EXE}" >&2
     exit 1
 fi
 
-cp "${HOST_EXE}" "${APP_HOST_EXE}"
+rm -rf "${APP_HOST_DIR}"
+cp -R "${HOST_DIR}" "${APP_HOST_DIR}"
 chmod 0755 "${APP_HOST_EXE}"
 
 # ---------------------------------------------------------------------------

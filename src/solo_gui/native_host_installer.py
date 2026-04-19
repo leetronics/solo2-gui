@@ -4,9 +4,9 @@ Register / unregister the SoloKeys Vault native messaging host for Chromium and 
 Works in four deployment scenarios:
   1. System-wide Linux package — uses packaged manifests in the browser-specific
      native-messaging directories and a stable host wrapper in /usr/bin.
-  2. Frozen PyInstaller app — looks for a sibling 'solokeys-secrets-host[.exe]'
-     binary next to the main executable. On macOS it installs a per-user copy
-     so Chrome does not execute a native host inside a quarantined app bundle.
+  2. Frozen PyInstaller app — looks for a sibling native host helper next to
+     the main executable. On macOS this is an onedir helper copied per-user so
+     Chrome does not trigger PyInstaller onefile Python.framework extraction.
   3. Installed via pip/poetry — uses the 'solokeys-secrets-host' console-script
      entry point.
   4. Running from source — creates a thin wrapper script in the user's app data
@@ -138,6 +138,14 @@ def _get_wrapper_path() -> Path:
     return _get_data_dir() / "solokeys-secrets-host"
 
 
+def _get_macos_host_install_dir() -> Path:
+    return _get_data_dir() / "native-host"
+
+
+def _get_macos_host_install_exe() -> Path:
+    return _get_macos_host_install_dir() / _native_host_binary_name()
+
+
 def _native_host_binary_name() -> str:
     if sys.platform == "win32":
         return "solokeys-secrets-host.exe"
@@ -156,21 +164,54 @@ def _host_exe_is_valid(host_exe: str | Path) -> bool:
 def _clear_macos_quarantine(path: Path) -> None:
     if sys.platform != "darwin":
         return
-    try:
-        os.removexattr(path, "com.apple.quarantine")
-    except (AttributeError, OSError):
-        pass
+
+    paths = [path]
+    if path.is_dir():
+        for root, dirs, files in os.walk(path):
+            root_path = Path(root)
+            paths.extend(root_path / name for name in dirs)
+            paths.extend(root_path / name for name in files)
+
+    for candidate in paths:
+        try:
+            os.removexattr(candidate, "com.apple.quarantine")
+        except (AttributeError, OSError):
+            pass
+
+
+def _find_frozen_native_host_exe() -> Optional[Path]:
+    exe_dir = Path(sys.executable).parent
+    name = _native_host_binary_name()
+
+    onedir_exe = exe_dir / name / name
+    if _host_exe_is_valid(onedir_exe):
+        return onedir_exe
+
+    sibling_exe = exe_dir / name
+    if _host_exe_is_valid(sibling_exe):
+        return sibling_exe
+
+    return None
 
 
 def _install_frozen_macos_host(source: Path) -> Optional[str]:
-    target = _get_wrapper_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    name = _native_host_binary_name()
+    if source.parent.name != name:
+        return None
+
+    target_dir = _get_macos_host_install_dir()
+    target = _get_macos_host_install_exe()
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        if not _paths_match(str(source), str(target)):
-            shutil.copyfile(source, target)
+        if target_dir.exists():
+            if target_dir.is_dir():
+                shutil.rmtree(target_dir)
+            else:
+                target_dir.unlink()
+        shutil.copytree(source.parent, target_dir, symlinks=True)
         target.chmod(0o755)
-        _clear_macos_quarantine(target)
+        _clear_macos_quarantine(target_dir)
     except Exception:
         return None
 
@@ -184,20 +225,17 @@ def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
     Return the absolute path to the native host executable, or None if not found.
     """
     if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).parent
-        sibling = exe_dir / _native_host_binary_name()
+        source = _find_frozen_native_host_exe()
         if sys.platform == "darwin":
-            if create_wrapper and _host_exe_is_valid(sibling):
-                return _install_frozen_macos_host(sibling)
-            installed = _get_wrapper_path()
+            if create_wrapper and source is not None:
+                return _install_frozen_macos_host(source)
+            installed = _get_macos_host_install_exe()
             if _host_exe_is_valid(installed):
-                return str(installed)
-            if _host_exe_is_valid(sibling):
                 return str(installed)
             return None
 
-        if _host_exe_is_valid(sibling):
-            return str(sibling)
+        if source is not None:
+            return str(source)
         # A frozen GUI executable cannot be used as "python -m solo_gui.native_host".
         # Packaged builds must bundle the dedicated native-host helper binary.
         return None
