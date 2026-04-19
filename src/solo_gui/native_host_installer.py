@@ -153,7 +153,7 @@ def _get_macos_native_host_mode() -> str:
     if sys.platform != "darwin" or not getattr(sys, "frozen", False):
         return MACOS_HOST_MODE_COPY
 
-    marker = Path(sys.executable).parent / MACOS_HOST_MODE_MARKER
+    marker = _get_macos_bundle_resources_dir() / MACOS_HOST_MODE_MARKER
     try:
         value = marker.read_text(encoding="utf-8").strip().lower()
     except Exception:
@@ -162,6 +162,10 @@ def _get_macos_native_host_mode() -> str:
     if value == MACOS_HOST_MODE_APP:
         return MACOS_HOST_MODE_APP
     return MACOS_HOST_MODE_COPY
+
+
+def _get_macos_bundle_resources_dir() -> Path:
+    return Path(sys.executable).parent.parent / "Resources"
 
 
 def _native_host_binary_name() -> str:
@@ -201,9 +205,12 @@ def _find_frozen_native_host_exe() -> Optional[Path]:
     exe_dir = Path(sys.executable).parent
     name = _native_host_binary_name()
 
-    onedir_exe = exe_dir / name / name
-    if _host_exe_is_valid(onedir_exe):
-        return onedir_exe
+    for onedir_exe in (
+        _get_macos_bundle_resources_dir() / name / name,
+        exe_dir / name / name,
+    ):
+        if _host_exe_is_valid(onedir_exe):
+            return onedir_exe
 
     sibling_exe = exe_dir / name
     if _host_exe_is_valid(sibling_exe):

@@ -44,7 +44,8 @@ APP_VERSION="$(python3 scripts/app_version.py resolved)"
 DMG_NAME="SoloKeys-GUI-${APP_VERSION}.dmg"
 HOST_DIR="dist/solokeys-secrets-host"
 HOST_EXE="${HOST_DIR}/solokeys-secrets-host"
-APP_HOST_DIR="dist/${APP_NAME}.app/Contents/MacOS/solokeys-secrets-host"
+APP_RESOURCES_DIR="dist/${APP_NAME}.app/Contents/Resources"
+APP_HOST_DIR="${APP_RESOURCES_DIR}/solokeys-secrets-host"
 APP_HOST_EXE="${APP_HOST_DIR}/solokeys-secrets-host"
 NATIVE_HOST_MODE="${SOLOKEYS_MACOS_NATIVE_HOST_MODE:-}"
 CODESIGN_IDENTITY="${MACOS_CODESIGN_IDENTITY:-${APPLE_CODESIGN_IDENTITY:--}}"
@@ -170,11 +171,12 @@ if [[ ! -d "${HOST_DIR}" || ! -x "${HOST_EXE}" ]]; then
     exit 1
 fi
 
+mkdir -p "${APP_RESOURCES_DIR}"
 rm -rf "${APP_HOST_DIR}"
 cp -R "${HOST_DIR}" "${APP_HOST_DIR}"
 chmod 0755 "${APP_HOST_EXE}"
 printf "%s\n" "${NATIVE_HOST_MODE}" \
-    > "dist/${APP_NAME}.app/Contents/MacOS/${NATIVE_HOST_MODE_MARKER}"
+    > "${APP_RESOURCES_DIR}/${NATIVE_HOST_MODE_MARKER}"
 
 # ---------------------------------------------------------------------------
 # 7. Codesign
