@@ -5,7 +5,8 @@ Works in four deployment scenarios:
   1. System-wide Linux package — uses packaged manifests in the browser-specific
      native-messaging directories and a stable host wrapper in /usr/bin.
   2. Frozen PyInstaller app — looks for a sibling 'solokeys-secrets-host[.exe]'
-     binary next to the main executable. No Python needed on the user's machine.
+     binary next to the main executable. On macOS it installs a per-user copy
+     so Chrome does not execute a native host inside a quarantined app bundle.
   3. Installed via pip/poetry — uses the 'solokeys-secrets-host' console-script
      entry point.
   4. Running from source — creates a thin wrapper script in the user's app data
@@ -66,17 +67,42 @@ def _get_manifest_dirs(browser_key: str) -> list[Path]:
         ]
 
     if sys.platform == "darwin":
-        return [
-            Path.home() / "Library" / "Application Support" / "Google" / "Chrome" / "NativeMessagingHosts",
-            Path.home() / "Library" / "Application Support" / "Chromium" / "NativeMessagingHosts",
-            Path.home() / "Library" / "Application Support" / "Google" / "Chrome Canary" / "NativeMessagingHosts",
-        ]
+        return _get_macos_chromium_manifest_dirs()
 
     return [
         Path.home() / ".config" / "google-chrome" / "NativeMessagingHosts",
         Path.home() / ".config" / "chromium" / "NativeMessagingHosts",
         Path.home() / ".var" / "app" / "com.google.Chrome" / "config" / "google-chrome" / "NativeMessagingHosts",
         Path.home() / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium" / "NativeMessagingHosts",
+    ]
+
+
+def _get_macos_chromium_manifest_dirs() -> list[Path]:
+    app_support = Path.home() / "Library" / "Application Support"
+    default_profile = app_support / "Google" / "Chrome"
+    profile_roots = [
+        default_profile,
+        app_support / "Google" / "Chrome Beta",
+        app_support / "Google" / "Chrome Dev",
+        app_support / "Google" / "Chrome Canary",
+        app_support / "Google" / "Chrome for Testing",
+        app_support / "Chromium",
+        app_support / "BraveSoftware" / "Brave-Browser",
+        app_support / "BraveSoftware" / "Brave-Browser-Beta",
+        app_support / "BraveSoftware" / "Brave-Browser-Nightly",
+        app_support / "Microsoft Edge",
+        app_support / "Microsoft Edge Beta",
+        app_support / "Microsoft Edge Dev",
+        app_support / "Microsoft Edge Canary",
+        app_support / "Vivaldi",
+        app_support / "Vivaldi Snapshot",
+        Path.home() / ".chrome-debug-profile",
+    ]
+
+    return [
+        profile_root / "NativeMessagingHosts"
+        for profile_root in profile_roots
+        if profile_root == default_profile or profile_root.exists()
     ]
 
 
@@ -127,6 +153,32 @@ def _host_exe_is_valid(host_exe: str | Path) -> bool:
     return True
 
 
+def _clear_macos_quarantine(path: Path) -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        os.removexattr(path, "com.apple.quarantine")
+    except (AttributeError, OSError):
+        pass
+
+
+def _install_frozen_macos_host(source: Path) -> Optional[str]:
+    target = _get_wrapper_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if not _paths_match(str(source), str(target)):
+            shutil.copyfile(source, target)
+        target.chmod(0o755)
+        _clear_macos_quarantine(target)
+    except Exception:
+        return None
+
+    if _host_exe_is_valid(target):
+        return str(target)
+    return None
+
+
 def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
     """
     Return the absolute path to the native host executable, or None if not found.
@@ -134,6 +186,16 @@ def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).parent
         sibling = exe_dir / _native_host_binary_name()
+        if sys.platform == "darwin":
+            if create_wrapper and _host_exe_is_valid(sibling):
+                return _install_frozen_macos_host(sibling)
+            installed = _get_wrapper_path()
+            if _host_exe_is_valid(installed):
+                return str(installed)
+            if _host_exe_is_valid(sibling):
+                return str(installed)
+            return None
+
         if _host_exe_is_valid(sibling):
             return str(sibling)
         # A frozen GUI executable cannot be used as "python -m solo_gui.native_host".
@@ -246,14 +308,32 @@ def _needs_repair(browser_key: str) -> bool:
         return False
 
     expected_host_exe = find_native_host_exe(create_wrapper=False)
-    registered_host_exe = _get_registered_host_exe(browser_key, HOST_NAME)
-    if expected_host_exe and registered_host_exe:
+    return any(
+        _manifest_needs_repair(
+            directory / _manifest_filename(browser_key, HOST_NAME),
+            browser_key,
+            expected_host_exe,
+        )
+        for directory in _get_manifest_dirs(browser_key)
+    )
+
+
+def _manifest_needs_repair(
+    manifest_path: Path,
+    browser_key: str,
+    expected_host_exe: Optional[str],
+) -> bool:
+    if not _manifest_is_valid(manifest_path, HOST_NAME, browser_key):
+        return True
+
+    registered_host_exe = _get_manifest_host_exe(manifest_path)
+    if not registered_host_exe:
+        return True
+    if expected_host_exe:
         return not _paths_match(expected_host_exe, registered_host_exe)
-    if registered_host_exe:
-        if getattr(sys, "frozen", False):
-            return True
-        return not _paths_match(str(_get_wrapper_path()), registered_host_exe)
-    return False
+    if getattr(sys, "frozen", False):
+        return True
+    return not _paths_match(str(_get_wrapper_path()), registered_host_exe)
 
 
 def _manifest_dir_is_valid(browser_key: str, directory: Path) -> bool:
@@ -322,6 +402,10 @@ def _get_registered_host_exe(browser_key: str, host_name: str) -> Optional[str]:
     manifest_path = _get_registered_manifest_path(browser_key, host_name)
     if manifest_path is None or not manifest_path.exists():
         return None
+    return _get_manifest_host_exe(manifest_path)
+
+
+def _get_manifest_host_exe(manifest_path: Path) -> Optional[str]:
     try:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
     except Exception:
