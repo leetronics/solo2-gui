@@ -76,7 +76,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX can invalidate or complicate macOS code signing/notarization.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,   # must be console — Chrome reads stdout/stdin

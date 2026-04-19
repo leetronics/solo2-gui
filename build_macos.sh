@@ -41,6 +41,8 @@ fi
 
 APP_VERSION="$(python3 scripts/app_version.py resolved)"
 DMG_NAME="SoloKeys-GUI-${APP_VERSION}.dmg"
+HOST_EXE="dist/solokeys-secrets-host"
+APP_HOST_EXE="dist/${APP_NAME}.app/Contents/MacOS/solokeys-secrets-host"
 
 # ---------------------------------------------------------------------------
 # 2. Detect libusb
@@ -78,10 +80,10 @@ echo "Cleaning previous build..."
 rm -rf build dist
 
 # ---------------------------------------------------------------------------
-# 5. Run PyInstaller
+# 5. Run PyInstaller for the GUI
 # ---------------------------------------------------------------------------
 echo ""
-echo "Running PyInstaller..."
+echo "Running PyInstaller for GUI..."
 pyinstaller --clean --noconfirm solokeys_gui.spec
 
 if [[ ! -d "dist/${APP_NAME}.app" ]]; then
@@ -90,7 +92,22 @@ if [[ ! -d "dist/${APP_NAME}.app" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Ad-hoc codesign (required to run on Apple Silicon without Gatekeeper alert)
+# 6. Build and bundle the native messaging host helper
+# ---------------------------------------------------------------------------
+echo ""
+echo "Running PyInstaller for native host..."
+pyinstaller --clean --noconfirm native_host.spec
+
+if [[ ! -x "${HOST_EXE}" ]]; then
+    echo "Error: PyInstaller did not produce executable ${HOST_EXE}" >&2
+    exit 1
+fi
+
+cp "${HOST_EXE}" "${APP_HOST_EXE}"
+chmod 0755 "${APP_HOST_EXE}"
+
+# ---------------------------------------------------------------------------
+# 7. Ad-hoc codesign (required to run on Apple Silicon without Gatekeeper alert)
 #    For public distribution replace '-' with your Developer ID certificate.
 # ---------------------------------------------------------------------------
 echo ""
@@ -100,7 +117,7 @@ echo "Note: Ad-hoc signature only. For distribution, use:"
 echo "  codesign --force --deep --sign 'Developer ID Application: ...' 'dist/${APP_NAME}.app'"
 
 # ---------------------------------------------------------------------------
-# 7. Create DMG
+# 8. Create DMG
 # ---------------------------------------------------------------------------
 echo ""
 echo "Creating DMG..."
@@ -119,12 +136,13 @@ hdiutil create \
     "dist/${DMG_NAME}"
 
 # ---------------------------------------------------------------------------
-# 8. Summary
+# 9. Summary
 # ---------------------------------------------------------------------------
 echo ""
 echo "============================================================"
 echo "Build complete:"
 echo "  dist/${APP_NAME}.app"
+echo "  ${APP_HOST_EXE}"
 echo "  dist/${DMG_NAME}"
 echo ""
 echo "For public distribution you should:"

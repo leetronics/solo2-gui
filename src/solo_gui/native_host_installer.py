@@ -8,7 +8,8 @@ Works in four deployment scenarios:
      binary next to the main executable. No Python needed on the user's machine.
   3. Installed via pip/poetry — uses the 'solokeys-secrets-host' console-script
      entry point.
-  4. Running from source — creates a thin wrapper script that calls the module.
+  4. Running from source — creates a thin wrapper script in the user's app data
+     directory that calls the module with the current Python interpreter.
 """
 
 import json
@@ -106,10 +107,24 @@ def _get_windows_reg_keys(browser_key: str, host_name: str) -> list[str]:
 
 
 def _get_wrapper_path() -> Path:
-    here = Path(__file__).parent.resolve()
     if sys.platform == "win32":
-        return here / "solokeys_secrets_host.bat"
-    return here / "solokeys_secrets_host.sh"
+        return _get_data_dir() / "solokeys-secrets-host.bat"
+    return _get_data_dir() / "solokeys-secrets-host"
+
+
+def _native_host_binary_name() -> str:
+    if sys.platform == "win32":
+        return "solokeys-secrets-host.exe"
+    return "solokeys-secrets-host"
+
+
+def _host_exe_is_valid(host_exe: str | Path) -> bool:
+    path = Path(host_exe)
+    if not path.exists() or not path.is_file():
+        return False
+    if sys.platform != "win32" and not os.access(path, os.X_OK):
+        return False
+    return True
 
 
 def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
@@ -118,18 +133,22 @@ def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
     """
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).parent
-        name = "solokeys-secrets-host.exe" if sys.platform == "win32" else "solokeys-secrets-host"
-        sibling = exe_dir / name
-        if sibling.exists():
+        sibling = exe_dir / _native_host_binary_name()
+        if _host_exe_is_valid(sibling):
             return str(sibling)
+        # A frozen GUI executable cannot be used as "python -m solo_gui.native_host".
+        # Packaged builds must bundle the dedicated native-host helper binary.
+        return None
 
     on_path = shutil.which("solokeys-secrets-host")
-    if on_path:
+    if on_path and _host_exe_is_valid(on_path):
         return on_path
 
     wrapper = _get_wrapper_path()
-    if wrapper.exists() or not create_wrapper:
+    if wrapper.exists() and _host_exe_is_valid(wrapper):
         return str(wrapper)
+    if not create_wrapper:
+        return None
     return _create_wrapper()
 
 
@@ -137,9 +156,10 @@ def _create_wrapper() -> str:
     here = Path(__file__).parent.resolve()
     src_dir = here.parent.resolve()
     python = sys.executable
+    wrapper = _get_wrapper_path()
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
 
     if sys.platform == "win32":
-        wrapper = here / "solokeys_secrets_host.bat"
         wrapper.write_text(
             f'@echo off\r\n'
             f'if defined PYTHONPATH (\r\n'
@@ -152,7 +172,6 @@ def _create_wrapper() -> str:
             encoding="utf-8",
         )
     else:
-        wrapper = here / "solokeys_secrets_host.sh"
         wrapper.write_text(
             f'#!/bin/sh\n'
             f'export PYTHONPATH="{src_dir}${{PYTHONPATH:+:$PYTHONPATH}}"\n'
@@ -222,7 +241,7 @@ def _needs_repair(browser_key: str) -> bool:
     if _has_valid_system_manifest(browser_key) and _has_user_manifest_overrides(browser_key):
         return True
     if scope == "none":
-        return True
+        return False
     if scope != "user":
         return False
 
@@ -230,6 +249,10 @@ def _needs_repair(browser_key: str) -> bool:
     registered_host_exe = _get_registered_host_exe(browser_key, HOST_NAME)
     if expected_host_exe and registered_host_exe:
         return not _paths_match(expected_host_exe, registered_host_exe)
+    if registered_host_exe:
+        if getattr(sys, "frozen", False):
+            return True
+        return not _paths_match(str(_get_wrapper_path()), registered_host_exe)
     return False
 
 
@@ -333,7 +356,7 @@ def _manifest_is_valid(path: Path, expected_host_name: str, browser_key: str) ->
         if data.get("name") != expected_host_name:
             return False
         host_exe = data.get("path", "")
-        if not host_exe or not Path(host_exe).exists():
+        if not host_exe or not _host_exe_is_valid(host_exe):
             return False
 
         permissions_key, expected_values = _expected_permissions(browser_key)
@@ -382,9 +405,15 @@ def install() -> tuple[bool, str]:
             else:
                 _install_posix(host_exe, browser_key)
             if scope == "user":
-                messages.append(f"{label}: repaired native host registration.\nHost: {HOST_NAME}\nPath: {host_exe}")
+                messages.append(
+                    f"{label}: repaired native host registration.\n"
+                    f"Host: {HOST_NAME}\nPath: {host_exe}"
+                )
             else:
-                messages.append(f"{label}: registered native host.\nHost: {HOST_NAME}\nPath: {host_exe}")
+                messages.append(
+                    f"{label}: registered native host.\n"
+                    f"Host: {HOST_NAME}\nPath: {host_exe}"
+                )
         except Exception as exc:
             errors.append(f"{label}: registration failed: {exc}")
 
