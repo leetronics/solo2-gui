@@ -22,6 +22,9 @@ from typing import Optional
 
 HOST_NAME = "com.solokeys.secrets"
 OBSOLETE_HOST_NAMES = ("com.solokeys.totp",)
+MACOS_HOST_MODE_MARKER = ".solokeys-native-host-mode"
+MACOS_HOST_MODE_APP = "app"
+MACOS_HOST_MODE_COPY = "copy"
 
 CHROMIUM = "chromium"
 FIREFOX = "firefox"
@@ -146,6 +149,21 @@ def _get_macos_host_install_exe() -> Path:
     return _get_macos_host_install_dir() / _native_host_binary_name()
 
 
+def _get_macos_native_host_mode() -> str:
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return MACOS_HOST_MODE_COPY
+
+    marker = Path(sys.executable).parent / MACOS_HOST_MODE_MARKER
+    try:
+        value = marker.read_text(encoding="utf-8").strip().lower()
+    except Exception:
+        return MACOS_HOST_MODE_COPY
+
+    if value == MACOS_HOST_MODE_APP:
+        return MACOS_HOST_MODE_APP
+    return MACOS_HOST_MODE_COPY
+
+
 def _native_host_binary_name() -> str:
     if sys.platform == "win32":
         return "solokeys-secrets-host.exe"
@@ -227,9 +245,11 @@ def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
     if getattr(sys, "frozen", False):
         source = _find_frozen_native_host_exe()
         if sys.platform == "darwin":
+            if _get_macos_native_host_mode() == MACOS_HOST_MODE_APP:
+                return str(source) if source is not None else None
+            installed = _get_macos_host_install_exe()
             if create_wrapper and source is not None:
                 return _install_frozen_macos_host(source)
-            installed = _get_macos_host_install_exe()
             if _host_exe_is_valid(installed):
                 return str(installed)
             return None

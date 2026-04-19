@@ -129,6 +129,33 @@ To build a distributable app bundle and DMG:
 
 Artifacts are written to `dist/`.
 
+By default this creates an ad-hoc signed local build. For a Developer ID signed
+release build, provide a signing identity and notarization credentials:
+
+```bash
+export MACOS_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export MACOS_NOTARIZE=1
+export APPLE_NOTARY_KEY_PATH=/path/to/AuthKey_KEYID.p8
+export APPLE_NOTARY_KEY_ID=KEYID
+export APPLE_NOTARY_ISSUER_ID=ISSUER_UUID
+./build_macos.sh
+```
+
+Signed release builds automatically register the browser native messaging host
+from inside the signed `.app` bundle. Ad-hoc builds keep using a per-user copy
+under `~/Library/Application Support/solokeys-gui/` to avoid local Gatekeeper
+issues while developing.
+
+The GitHub desktop artifact workflows can sign and notarize macOS builds when
+these repository secrets are configured:
+
+- `APPLE_CERTIFICATE_P12`: base64-encoded Developer ID Application `.p12`
+- `APPLE_CERTIFICATE_PASSWORD`: password for that `.p12`
+- `APPLE_DEVELOPER_ID_APPLICATION`: full codesign identity string
+- `APPLE_NOTARY_KEY_BASE64`: base64-encoded App Store Connect API `.p8` key
+- `APPLE_NOTARY_KEY_ID`: App Store Connect API key ID
+- `APPLE_NOTARY_ISSUER_ID`: App Store Connect issuer UUID
+
 ### Windows
 
 Install Python 3.10+ and make sure `libusb-1.0.dll` is available. The build script looks for it in:

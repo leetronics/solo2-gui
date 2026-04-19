@@ -8,6 +8,7 @@ set -euo pipefail
 APP_NAME="SoloKeys GUI"
 BUILD_VERSION_FILE="src/solo_gui/_build_version.py"
 STAGING_DIR=""
+NATIVE_HOST_MODE_MARKER=".solokeys-native-host-mode"
 
 cleanup() {
     rm -f "${BUILD_VERSION_FILE}"
@@ -45,6 +46,70 @@ HOST_DIR="dist/solokeys-secrets-host"
 HOST_EXE="${HOST_DIR}/solokeys-secrets-host"
 APP_HOST_DIR="dist/${APP_NAME}.app/Contents/MacOS/solokeys-secrets-host"
 APP_HOST_EXE="${APP_HOST_DIR}/solokeys-secrets-host"
+NATIVE_HOST_MODE="${SOLOKEYS_MACOS_NATIVE_HOST_MODE:-}"
+CODESIGN_IDENTITY="${MACOS_CODESIGN_IDENTITY:-${APPLE_CODESIGN_IDENTITY:--}}"
+NOTARIZE="${MACOS_NOTARIZE:-0}"
+
+if [[ -z "${NATIVE_HOST_MODE}" ]]; then
+    if [[ "${CODESIGN_IDENTITY}" == "-" ]]; then
+        NATIVE_HOST_MODE="copy"
+    else
+        NATIVE_HOST_MODE="app"
+    fi
+fi
+
+if [[ "${NATIVE_HOST_MODE}" != "copy" && "${NATIVE_HOST_MODE}" != "app" ]]; then
+    echo "Error: SOLOKEYS_MACOS_NATIVE_HOST_MODE must be 'copy' or 'app'." >&2
+    exit 1
+fi
+
+if [[ "${NOTARIZE}" == "1" && "${CODESIGN_IDENTITY}" == "-" ]]; then
+    echo "Error: MACOS_NOTARIZE=1 requires a Developer ID MACOS_CODESIGN_IDENTITY." >&2
+    exit 1
+fi
+
+codesign_target() {
+    local target="$1"
+    if [[ "${CODESIGN_IDENTITY}" == "-" ]]; then
+        codesign --force --sign "-" "${target}"
+    else
+        codesign --force --options runtime --timestamp \
+            --sign "${CODESIGN_IDENTITY}" \
+            "${target}"
+    fi
+}
+
+is_macho_file() {
+    local target="$1"
+    file -b "${target}" | grep -q "Mach-O"
+}
+
+codesign_app_bundle() {
+    local app_bundle="$1"
+    local contents_dir="${app_bundle}/Contents"
+    local target
+
+    # Sign only actual code. Avoid codesign --deep here: PyInstaller onedir
+    # contains metadata directories such as *.dist-info that codesign can
+    # misclassify as invalid nested bundles.
+    while IFS= read -r -d '' target; do
+        codesign_target "${target}"
+    done < <(find "${contents_dir}" -type d -name "*.framework" -print0)
+
+    while IFS= read -r -d '' target; do
+        case "${target}" in
+            *.framework/*)
+                continue
+                ;;
+        esac
+        if is_macho_file "${target}"; then
+            codesign_target "${target}"
+        fi
+    done < <(find "${contents_dir}" -type f -print0)
+
+    codesign_target "${app_bundle}"
+    codesign --verify --strict --verbose=2 "${app_bundle}"
+}
 
 # ---------------------------------------------------------------------------
 # 2. Detect libusb
@@ -108,16 +173,18 @@ fi
 rm -rf "${APP_HOST_DIR}"
 cp -R "${HOST_DIR}" "${APP_HOST_DIR}"
 chmod 0755 "${APP_HOST_EXE}"
+printf "%s\n" "${NATIVE_HOST_MODE}" \
+    > "dist/${APP_NAME}.app/Contents/MacOS/${NATIVE_HOST_MODE_MARKER}"
 
 # ---------------------------------------------------------------------------
-# 7. Ad-hoc codesign (required to run on Apple Silicon without Gatekeeper alert)
-#    For public distribution replace '-' with your Developer ID certificate.
+# 7. Codesign
 # ---------------------------------------------------------------------------
 echo ""
-echo "Codesigning (ad-hoc)..."
-codesign --force --deep --sign "-" "dist/${APP_NAME}.app"
-echo "Note: Ad-hoc signature only. For distribution, use:"
-echo "  codesign --force --deep --sign 'Developer ID Application: ...' 'dist/${APP_NAME}.app'"
+echo "Codesigning..."
+if [[ "${CODESIGN_IDENTITY}" == "-" ]]; then
+    echo "Note: Ad-hoc signature only."
+fi
+codesign_app_bundle "dist/${APP_NAME}.app"
 
 # ---------------------------------------------------------------------------
 # 8. Create DMG
@@ -138,6 +205,36 @@ hdiutil create \
     -format UDZO \
     "dist/${DMG_NAME}"
 
+DMG_PATH="dist/${DMG_NAME}"
+
+if [[ "${CODESIGN_IDENTITY}" != "-" ]]; then
+    echo ""
+    echo "Codesigning DMG..."
+    codesign --force --timestamp --sign "${CODESIGN_IDENTITY}" "${DMG_PATH}"
+fi
+
+if [[ "${NOTARIZE}" == "1" ]]; then
+    echo ""
+    echo "Notarizing DMG..."
+    notary_args=()
+    if [[ -n "${APPLE_NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+        notary_args=(--keychain-profile "${APPLE_NOTARY_KEYCHAIN_PROFILE}")
+    elif [[ -n "${APPLE_NOTARY_KEY_PATH:-}" && -n "${APPLE_NOTARY_KEY_ID:-}" && -n "${APPLE_NOTARY_ISSUER_ID:-}" ]]; then
+        notary_args=(
+            --key "${APPLE_NOTARY_KEY_PATH}"
+            --key-id "${APPLE_NOTARY_KEY_ID}"
+            --issuer "${APPLE_NOTARY_ISSUER_ID}"
+        )
+    else
+        echo "Error: MACOS_NOTARIZE=1 requires APPLE_NOTARY_KEYCHAIN_PROFILE or" >&2
+        echo "APPLE_NOTARY_KEY_PATH, APPLE_NOTARY_KEY_ID and APPLE_NOTARY_ISSUER_ID." >&2
+        exit 1
+    fi
+
+    xcrun notarytool submit "${DMG_PATH}" "${notary_args[@]}" --wait
+    xcrun stapler staple "${DMG_PATH}"
+fi
+
 # ---------------------------------------------------------------------------
 # 9. Summary
 # ---------------------------------------------------------------------------
@@ -147,9 +244,11 @@ echo "Build complete:"
 echo "  dist/${APP_NAME}.app"
 echo "  ${APP_HOST_EXE}"
 echo "  dist/${DMG_NAME}"
+echo "  native host mode: ${NATIVE_HOST_MODE}"
+echo "  codesign identity: ${CODESIGN_IDENTITY}"
+echo "  notarized: ${NOTARIZE}"
 echo ""
-echo "For public distribution you should:"
-echo "  1. Codesign with a Developer ID Application certificate"
-echo "  2. Notarize with Apple: xcrun notarytool submit ..."
-echo "  3. Staple the ticket:   xcrun stapler staple 'dist/${DMG_NAME}'"
+if [[ "${CODESIGN_IDENTITY}" == "-" ]]; then
+    echo "For public distribution, set MACOS_CODESIGN_IDENTITY and MACOS_NOTARIZE=1."
+fi
 echo "============================================================"
