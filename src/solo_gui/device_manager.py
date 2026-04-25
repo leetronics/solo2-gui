@@ -211,13 +211,28 @@ class DeviceManager(QObject):
             or "wrong_channel" in error_msg
             or "invalid channel" in error_msg
             or "invalid_channel" in error_msg
+            or "invalid_seq" in error_msg
             or "key_agreement" in error_msg
             or "result.key_agreement" in error_msg
+            or "ctap error: 0x04" in error_msg
             or "6f00" in error_msg
             or "0x6f00" in error_msg
             or "device not available" in error_msg
             or "not connected" in error_msg
         )
+
+    @staticmethod
+    def _normalize_pin_retries(raw_retries: Any) -> Optional[int]:
+        """Extract a valid integer retry count from fido2 version-specific results."""
+        if isinstance(raw_retries, tuple):
+            raw_retries = raw_retries[0] if raw_retries else None
+        if isinstance(raw_retries, dict):
+            raw_retries = raw_retries.get(ClientPin.RESULT.PIN_RETRIES)
+        if isinstance(raw_retries, bool):
+            return int(raw_retries)
+        if isinstance(raw_retries, int):
+            return raw_retries
+        return None
 
     @staticmethod
     def _is_key_agreement_result_error(error: BaseException | str) -> bool:
@@ -406,7 +421,7 @@ class DeviceManager(QObject):
         try:
             if self._client_pin is None:
                 self._client_pin = ClientPin(self._ctap2)
-            retries = self._client_pin.get_pin_retries()[0]
+            retries = self._normalize_pin_retries(self._client_pin.get_pin_retries())
             request.callback(retries, None)
         except Exception as e:
             error_msg = str(e)
@@ -415,7 +430,7 @@ class DeviceManager(QObject):
                     try:
                         if self._client_pin is None:
                             self._client_pin = ClientPin(self._ctap2)
-                        retries = self._client_pin.get_pin_retries()[0]
+                        retries = self._normalize_pin_retries(self._client_pin.get_pin_retries())
                         request.callback(retries, None)
                         return
                     except Exception as e2:
