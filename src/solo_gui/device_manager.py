@@ -211,11 +211,18 @@ class DeviceManager(QObject):
             or "wrong_channel" in error_msg
             or "invalid channel" in error_msg
             or "invalid_channel" in error_msg
+            or "key_agreement" in error_msg
+            or "result.key_agreement" in error_msg
             or "6f00" in error_msg
             or "0x6f00" in error_msg
             or "device not available" in error_msg
             or "not connected" in error_msg
         )
+
+    @staticmethod
+    def _is_key_agreement_result_error(error: BaseException | str) -> bool:
+        error_msg = str(error).lower()
+        return "key_agreement" in error_msg or "result.key_agreement" in error_msg
     
     def _wait_for_device(self, timeout: float = 10.0) -> bool:
         """Wait for device to reappear after disconnect."""
@@ -298,6 +305,9 @@ class DeviceManager(QObject):
         )
         if persistent_cred_mgmt is not None:
             permissions.append(persistent_cred_mgmt)
+        # Some authenticators advertise pinUvAuthToken but fail the
+        # permission-scoped token path. Fall back to the legacy token flow.
+        permissions.append(None)
 
         last_error: Exception | None = None
         for attempt in range(2):
@@ -323,6 +333,8 @@ class DeviceManager(QObject):
                         permission,
                         exc,
                     )
+                    if self._is_key_agreement_result_error(exc):
+                        break
 
             if last_error is None or not self._is_retryable_channel_error(last_error):
                 break
