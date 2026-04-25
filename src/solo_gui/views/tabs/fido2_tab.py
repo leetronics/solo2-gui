@@ -163,6 +163,7 @@ class Fido2Tab(QWidget):
         self._credentials: List[Fido2Credential] = []  # Store loaded credentials
         self._pin_set: bool = False
         self._refresh_after_pin_status: bool = False
+        self._pending_pin_action: Optional[str] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -341,6 +342,7 @@ class Fido2Tab(QWidget):
         self._pin_status_label.setText("Unknown")
         self._status_label.setText("No device connected")
         self._refresh_after_pin_status = False
+        self._pending_pin_action = None
         self._transport_hint_label.setVisible(False)
         self._restart_admin_button.setVisible(False)
         self._set_buttons_enabled(False)
@@ -507,6 +509,11 @@ class Fido2Tab(QWidget):
         if not self._worker:
             return
 
+        self._pending_pin_action = "change"
+        self._set_busy(True, "Checking current PIN status...")
+        self._worker.get_pin_status()
+
+    def _show_change_pin_dialog(self) -> None:
         dialog = ChangePinDialog(self, is_new_pin=False)
         if dialog.exec() == QDialog.Accepted:
             current_pin = dialog.get_current_pin()
@@ -520,6 +527,11 @@ class Fido2Tab(QWidget):
         if not self._worker:
             return
 
+        self._pending_pin_action = "set"
+        self._set_busy(True, "Checking current PIN status...")
+        self._worker.get_pin_status()
+
+    def _show_set_pin_dialog(self) -> None:
         dialog = ChangePinDialog(self, is_new_pin=True)
         if dialog.exec() == QDialog.Accepted:
             new_pin = dialog.get_new_pin()
@@ -591,6 +603,7 @@ class Fido2Tab(QWidget):
 
         if not ctap2_available:
             self._refresh_after_pin_status = False
+            self._pending_pin_action = None
             self._set_busy(False)
             self._pin_status_label.setText("CTAP HID not available")
             self._change_pin_button.setEnabled(False)
@@ -640,6 +653,10 @@ class Fido2Tab(QWidget):
         # Refresh is enabled whenever the device supports credential management,
         # regardless of PIN state (no-PIN case is handled in _refresh_credentials).
         self._refresh_button.setEnabled(cred_mgmt)
+
+        if self._handle_pending_pin_action(pin_set):
+            return
+
         if not cred_mgmt:
             self._refresh_after_pin_status = False
             self._set_busy(False)
@@ -648,9 +665,43 @@ class Fido2Tab(QWidget):
             self._refresh_after_pin_status = False
             self._load_credentials_after_status_refresh()
 
+    def _handle_pending_pin_action(self, pin_set: bool) -> bool:
+        """Complete a Set/Change PIN click after synchronizing live PIN state."""
+        action = self._pending_pin_action
+        if action is None:
+            return False
+
+        self._pending_pin_action = None
+        self._set_busy(False)
+
+        if action == "set":
+            if pin_set:
+                QMessageBox.information(
+                    self,
+                    "PIN Already Set",
+                    "This device already has a FIDO2 PIN. Use Change PIN instead.",
+                )
+                return True
+            self._show_set_pin_dialog()
+            return True
+
+        if action == "change":
+            if not pin_set:
+                QMessageBox.information(
+                    self,
+                    "No PIN Set",
+                    "This device does not have a FIDO2 PIN yet. Use Set New PIN first.",
+                )
+                return True
+            self._show_change_pin_dialog()
+            return True
+
+        return False
+
     def _on_error_occurred(self, error: str) -> None:
         """Handle worker error."""
         self._refresh_after_pin_status = False
+        self._pending_pin_action = None
         self._set_busy(False)
         # PIN not set is informational, not an error
         if "PIN not set" in error:
