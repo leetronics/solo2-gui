@@ -15,6 +15,7 @@ Works in four deployment scenarios:
 
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -22,6 +23,8 @@ from typing import Optional
 
 HOST_NAME = "com.solokeys.secrets"
 OBSOLETE_HOST_NAMES = ("com.solokeys.totp",)
+APPIMAGE_NATIVE_HOST_ARG = "--native-host"
+APPIMAGE_WRAPPER_MARKER = "# SoloKeys GUI AppImage native host wrapper"
 MACOS_HOST_MODE_MARKER = ".solokeys-native-host-mode"
 MACOS_HOST_MODE_APP = "app"
 MACOS_HOST_MODE_COPY = "copy"
@@ -141,6 +144,55 @@ def _get_wrapper_path() -> Path:
     return _get_data_dir() / "solokeys-secrets-host"
 
 
+def _get_appimage_path() -> Optional[Path]:
+    if not sys.platform.startswith("linux"):
+        return None
+    if not getattr(sys, "frozen", False):
+        return None
+
+    value = os.environ.get("APPIMAGE", "").strip()
+    if not value:
+        return None
+
+    path = Path(value)
+    if not path.is_absolute():
+        path = path.resolve(strict=False)
+
+    if not path.exists() or not path.is_file() or not os.access(path, os.X_OK):
+        return None
+    return path
+
+
+def _appimage_wrapper_contents(appimage_path: Path) -> str:
+    appimage = shlex.quote(str(appimage_path))
+    native_host_arg = shlex.quote(APPIMAGE_NATIVE_HOST_ARG)
+    return (
+        "#!/bin/sh\n"
+        f"{APPIMAGE_WRAPPER_MARKER}\n"
+        "export SOLOKEYS_PATH=auto\n"
+        f"exec {appimage} {native_host_arg} \"$@\"\n"
+    )
+
+
+def _appimage_wrapper_is_current(wrapper: Path, appimage_path: Path) -> bool:
+    if not _host_exe_is_valid(wrapper):
+        return False
+    try:
+        return wrapper.read_text(encoding="utf-8") == _appimage_wrapper_contents(
+            appimage_path
+        )
+    except Exception:
+        return False
+
+
+def _create_appimage_wrapper(appimage_path: Path) -> str:
+    wrapper = _get_wrapper_path()
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(_appimage_wrapper_contents(appimage_path), encoding="utf-8")
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
 def _get_macos_host_install_dir() -> Path:
     return _get_data_dir() / "native-host"
 
@@ -249,6 +301,17 @@ def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
     """
     Return the absolute path to the native host executable, or None if not found.
     """
+    appimage = _get_appimage_path()
+    if appimage is not None:
+        wrapper = _get_wrapper_path()
+        if create_wrapper:
+            if not _appimage_wrapper_is_current(wrapper, appimage):
+                return _create_appimage_wrapper(appimage)
+            return str(wrapper)
+        if _appimage_wrapper_is_current(wrapper, appimage):
+            return str(wrapper)
+        return None
+
     if getattr(sys, "frozen", False):
         source = _find_frozen_native_host_exe()
         if sys.platform == "darwin":

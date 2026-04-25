@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QGridLayout, QPushButton,
     QProgressBar, QMessageBox, QLineEdit, QFileDialog, QPlainTextEdit
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 
 from solo_gui.models.device import SoloDevice, DeviceInfo, DeviceMode, format_firmware_full
 from solo_gui.workers.firmware_worker import FirmwareUpdateWorker, FirmwareInfo
@@ -31,6 +31,7 @@ class OverviewTab(QWidget):
         self._firmware_info: Optional[FirmwareInfo] = None
         self._isp_variant: Optional[str] = None
         self._firmware_busy: bool = False  # True while a flash/update is in flight
+        self._touch_prompt: Optional[QMessageBox] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -176,6 +177,7 @@ class OverviewTab(QWidget):
         self._firmware_thread.start()
 
     def _cleanup_firmware_worker(self) -> None:
+        self._hide_touch_prompt()
         if self._firmware_thread:
             self._firmware_thread.quit()
             self._firmware_thread.wait()
@@ -247,8 +249,8 @@ class OverviewTab(QWidget):
             self,
             "Confirm Firmware Update",
             f"Update firmware to version {self._firmware_info.version}?\n\n"
-            "The device will reboot to bootloader mode during the update. "
-            "Touch the device button when prompted to confirm the reboot.\n\n"
+            "After you click Yes, watch the SoloKey and press its button when it "
+            "asks for touch confirmation to enter bootloader mode.\n\n"
             "Do not disconnect the device during this process.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -276,8 +278,8 @@ class OverviewTab(QWidget):
             self,
             "Flash Firmware",
             f"Flash firmware from:\n{path}\n\n"
-            "The device will reboot to bootloader mode. "
-            "Touch the device button when prompted to confirm the reboot.\n\n"
+            "After you click Yes, watch the SoloKey and press its button when it "
+            "asks for touch confirmation to enter bootloader mode.\n\n"
             "Do not disconnect during the process.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -305,6 +307,10 @@ class OverviewTab(QWidget):
     def _on_firmware_progress(self, progress: int, message: str) -> None:
         self._status_progress.setVisible(True)
         self._status_progress.setValue(progress)
+        if "press the SoloKey button now" in message:
+            self._show_touch_prompt()
+        elif "Bootloader connected" in message or message.startswith(("Erasing", "Writing")):
+            self._hide_touch_prompt()
         # "Erasing: …" and "Writing: …" update the last line in place so the
         # log doesn't fill with hundreds of identical progress lines.
         if message.startswith(("Erasing: ", "Writing: ")):
@@ -331,6 +337,7 @@ class OverviewTab(QWidget):
             self._download_update_button.setVisible(False)
 
     def _on_update_completed(self, success: bool, message: str) -> None:
+        self._hide_touch_prompt()
         self._firmware_busy = False
         self._set_busy(False)
         self._log_area.appendPlainText(message)
@@ -339,6 +346,7 @@ class OverviewTab(QWidget):
             QMessageBox.critical(self, "Update Failed", message)
 
     def _on_firmware_error(self, error: str) -> None:
+        self._hide_touch_prompt()
         self._firmware_busy = False
         self._set_busy(False)
         self._log_area.appendPlainText(f"Error: {error}")
@@ -363,3 +371,30 @@ class OverviewTab(QWidget):
             self._check_variant_btn.setEnabled(False)
             self._flash_file_btn.setEnabled(False)
             self._flash_group.setVisible(False)
+
+    def _show_touch_prompt(self) -> None:
+        if self._touch_prompt is not None:
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Touch SoloKey")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(
+            "Press the SoloKey button now to confirm entering bootloader mode.\n\n"
+            "This message closes automatically when the bootloader is detected "
+            "or the operation times out."
+        )
+        msg.setStandardButtons(QMessageBox.NoButton)
+        msg.setModal(False)
+        msg.finished.connect(lambda _result: setattr(self, "_touch_prompt", None))
+        self._touch_prompt = msg
+        msg.show()
+        QTimer.singleShot(17000, self._hide_touch_prompt)
+
+    def _hide_touch_prompt(self) -> None:
+        if self._touch_prompt is None:
+            return
+        prompt = self._touch_prompt
+        self._touch_prompt = None
+        prompt.close()
+        prompt.deleteLater()

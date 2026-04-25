@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, Signal
 _log = logging.getLogger("solo_gui.admin_worker")
 
 from solo2.admin import AdminCommand, AdminSession, DeviceDiagnostics, RebootMode
+from solo2.bootloader import BootloaderError, BootloaderSession
 from solo2 import lpc55_isp
 from solo_gui.device_manager import DeviceManager
 
@@ -183,6 +184,17 @@ class AdminWorker(QObject):
         self.operation_completed.emit(True, f"Variant: {result}")
         self.variant_ready.emit(result)
 
+    def _wait_for_bootloader(self, timeout_s: float) -> bool:
+        """Wait for the ROM bootloader using solo2's full HID fallback path."""
+        try:
+            session = BootloaderSession.find(timeout=timeout_s)
+        except BootloaderError as exc:
+            _log.debug("BootloaderSession fallback did not find bootloader: %s", exc)
+            return lpc55_isp.wait_for_bootloader(timeout_s=0.5)
+
+        session.close()
+        return True
+
     def unlock_device(self, pfr_yaml_path: str = "") -> None:
         """
         Disable Secure Boot on a Hacker (locked) device via MCUBOOT ISP.
@@ -204,11 +216,16 @@ class AdminWorker(QObject):
         except Exception as exc:
             _log.debug("unlock_device: reboot-to-bootloader raised (expected): %s", exc)
 
-        self.operation_progress.emit(10, "Waiting for bootloader…")
-        if not lpc55_isp.wait_for_bootloader(timeout_s=10.0):
+        self.operation_progress.emit(
+            10,
+            "Waiting for bootloader — press the SoloKey button now if it is blinking…",
+        )
+        if not self._wait_for_bootloader(timeout_s=20.0):
             self.error_occurred.emit(
-                "Bootloader device did not appear within 10 s.\n"
-                "Make sure the device is connected and try again."
+                "Bootloader device did not appear within 20 s.\n"
+                "Make sure the device is connected, press the SoloKey button when "
+                "it asks for touch confirmation, "
+                "and try again."
             )
             return
 

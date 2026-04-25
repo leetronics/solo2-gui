@@ -611,10 +611,22 @@ class MainWindow(QMainWindow):
             self._fido2_tab.refresh_state()
 
     def _refresh_devices(self) -> None:
+        self._status_bar.showMessage("Refreshing devices...")
         self._device_monitor.refresh_devices()
         if self._current_device is not None:
             self._fido2_tab.refresh_state()
-        self._status_bar.showMessage("Refreshing devices...")
+        QTimer.singleShot(500, self._show_current_device_status)
+
+    def _show_current_device_status(self) -> None:
+        if self._current_device is None:
+            self._status_bar.showMessage("No device connected")
+            return
+        try:
+            info = self._current_device.get_info()
+            mode_label = "Bootloader" if info.mode.value == "bootloader" else "Normal"
+            self._status_bar.showMessage(f"Solo 2 connected ({mode_label} mode)")
+        except Exception:
+            self._status_bar.showMessage("Ready")
 
     def _prepare_for_reconnect(self) -> None:
         """Tell the device monitor to expect a disconnect, without clearing worker state.

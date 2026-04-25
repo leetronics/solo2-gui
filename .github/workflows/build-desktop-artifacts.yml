@@ -259,14 +259,16 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev rpm
+          sudo apt-get install -y curl dpkg-dev file libfuse2 libpcsclite-dev rpm swig
 
       - name: Build Linux artifacts
         run: |
           chmod +x build_linux_deb.sh
           chmod +x build_linux_rpm.sh
+          chmod +x build_linux_appimage.sh
           ./build_linux_deb.sh
           ./build_linux_rpm.sh
+          ./build_linux_appimage.sh
 
       - name: Upload Linux to draft release
         uses: softprops/action-gh-release@v2
@@ -280,3 +282,4 @@ jobs:
           files: |
             dist/solokeys-gui_*.deb
             dist/solokeys-gui-*.rpm
+            dist/SoloKeys-GUI-*.AppImage

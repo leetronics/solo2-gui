@@ -162,6 +162,7 @@ class Fido2Tab(QWidget):
         self._worker_thread: Optional[QThread] = None
         self._credentials: List[Fido2Credential] = []  # Store loaded credentials
         self._pin_set: bool = False
+        self._refresh_after_pin_status: bool = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -339,6 +340,7 @@ class Fido2Tab(QWidget):
         self._credentials_table.setRowCount(0)
         self._pin_status_label.setText("Unknown")
         self._status_label.setText("No device connected")
+        self._refresh_after_pin_status = False
         self._transport_hint_label.setVisible(False)
         self._restart_admin_button.setVisible(False)
         self._set_buttons_enabled(False)
@@ -422,12 +424,21 @@ class Fido2Tab(QWidget):
         if not self._worker:
             return
 
+        self._refresh_after_pin_status = True
+        self._set_busy(True, "Checking current device state...")
+        self._worker.get_pin_status()
+
+    def _load_credentials_after_status_refresh(self) -> None:
+        """Load credentials after Refresh has synchronized live device state."""
+        if not self._worker:
+            self._set_busy(False)
+            return
         if not self._pin_set:
+            self._set_busy(False)
             self._status_label.setText(
                 "Set a PIN first to enable credential management"
             )
             return
-
         self._set_busy(True, "Loading credentials...")
         self._worker.load_credentials()
 
@@ -579,6 +590,8 @@ class Fido2Tab(QWidget):
         cred_mgmt = status.get("cred_mgmt_supported", False)
 
         if not ctap2_available:
+            self._refresh_after_pin_status = False
+            self._set_busy(False)
             self._pin_status_label.setText("CTAP HID not available")
             self._change_pin_button.setEnabled(False)
             self._set_pin_button.setEnabled(False)
@@ -628,10 +641,16 @@ class Fido2Tab(QWidget):
         # regardless of PIN state (no-PIN case is handled in _refresh_credentials).
         self._refresh_button.setEnabled(cred_mgmt)
         if not cred_mgmt:
+            self._refresh_after_pin_status = False
+            self._set_busy(False)
             self._status_label.setText("Credential management not supported")
+        elif self._refresh_after_pin_status:
+            self._refresh_after_pin_status = False
+            self._load_credentials_after_status_refresh()
 
     def _on_error_occurred(self, error: str) -> None:
         """Handle worker error."""
+        self._refresh_after_pin_status = False
         self._set_busy(False)
         # PIN not set is informational, not an error
         if "PIN not set" in error:

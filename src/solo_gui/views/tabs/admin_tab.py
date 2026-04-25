@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFileDialog,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QGuiApplication
 
 from solo_gui.models.device import SoloDevice
@@ -91,6 +91,7 @@ class AdminTab(QWidget):
         self._admin_worker: Optional[AdminWorker] = None
         self._worker_thread: Optional[QThread] = None
         self._isp_monitoring_paused = False
+        self._touch_prompt: Optional[QMessageBox] = None
         self._last_isp_variant: Optional[str] = None
         # Survives clear_device() so the ISP result is restored after a device
         # reconnect (e.g. after check_variant reboots back to firmware mode).
@@ -285,6 +286,7 @@ class AdminTab(QWidget):
         self._worker_thread.start()
 
     def _cleanup_worker(self) -> None:
+        self._hide_touch_prompt()
         if self._worker_thread:
             self._worker_thread.quit()
             self._worker_thread.wait()
@@ -413,7 +415,9 @@ class AdminTab(QWidget):
             "After unlocking, unsigned (custom) firmware can be flashed freely.\n\n"
             "WARNING: Restoring factory Secure Boot is not currently supported.\n"
             "Only proceed if you intend to run custom firmware on this device.\n\n"
-            "The device will reboot briefly. Continue?",
+            "After you click Yes, watch the SoloKey and press its button when it "
+            "asks for touch confirmation to enter bootloader mode.\n\n"
+            "Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -486,15 +490,52 @@ class AdminTab(QWidget):
     def _on_operation_progress(self, progress: int, message: str) -> None:
         self._status_progress.setValue(progress)
         self._status_label.setText(message)
+        if "press the SoloKey button now" in message:
+            self._show_touch_prompt()
+        elif "Reading" in message or "Writing" in message or "Done" in message:
+            self._hide_touch_prompt()
 
     def _on_operation_completed(self, success: bool, message: str) -> None:
+        self._hide_touch_prompt()
         self._set_busy(False)
         self._status_label.setText(message if success else f"Failed: {message}")
 
     def _on_error(self, error: str) -> None:
+        self._hide_touch_prompt()
+        if self._isp_monitoring_paused:
+            self.isp_done.emit()
+            self._isp_monitoring_paused = False
+
         self._set_busy(False)
         self._status_label.setText(f"Error: {error}")
         QMessageBox.warning(self, "Error", error)
+
+    def _show_touch_prompt(self) -> None:
+        if self._touch_prompt is not None:
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Touch SoloKey")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(
+            "Press the SoloKey button now to confirm entering bootloader mode.\n\n"
+            "This message closes automatically when the device enters bootloader "
+            "mode or the operation times out."
+        )
+        msg.setStandardButtons(QMessageBox.NoButton)
+        msg.setModal(False)
+        msg.finished.connect(lambda _result: setattr(self, "_touch_prompt", None))
+        self._touch_prompt = msg
+        msg.show()
+        QTimer.singleShot(22000, self._hide_touch_prompt)
+
+    def _hide_touch_prompt(self) -> None:
+        if self._touch_prompt is None:
+            return
+        prompt = self._touch_prompt
+        self._touch_prompt = None
+        prompt.close()
+        prompt.deleteLater()
 
     def _on_device_disconnected(self) -> None:
         QMessageBox.information(

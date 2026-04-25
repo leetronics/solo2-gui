@@ -317,14 +317,23 @@ class FirmwareUpdateWorker(QObject):
         self.update_progress.emit(50, "Sending reboot-to-bootloader command…")
         try:
             AdminSession(self._device).reboot(RebootMode.BOOTLOADER)
-            self.update_progress.emit(52, "Reboot command accepted — touch button if prompted")
+            self.update_progress.emit(
+                52,
+                "Reboot command accepted — press the SoloKey button now if it is blinking",
+            )
         except Exception:
             self.update_progress.emit(52, "Reboot command sent (no confirmation)")
 
-        self.update_progress.emit(54, "Waiting for bootloader to appear…")
+        self.update_progress.emit(
+            54,
+            "Waiting for bootloader — press the SoloKey button now if it is asking for touch",
+        )
         time.sleep(2.0)
 
-        self.update_progress.emit(56, "Searching for bootloader device…")
+        self.update_progress.emit(
+            56,
+            "Searching for bootloader device — keep the SoloKey connected",
+        )
 
         def _progress(written: int, total_bytes: int) -> None:
             pct = 65 + int(written / total_bytes * 25)

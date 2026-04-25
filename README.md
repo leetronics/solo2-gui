@@ -109,9 +109,12 @@ To build the Linux packages locally:
 ```bash
 ./build_linux_deb.sh
 ./build_linux_rpm.sh
+./build_linux_appimage.sh
 ```
 
-The Debian package is written to `dist/` as `solokeys-gui_<version>_<arch>.deb`. The RPM package is written to `dist/` as `solokeys-gui-<version>-1.<arch>.rpm`. For distros without a native package yet, the source-based path above remains the supported fallback.
+The Debian package is written to `dist/` as `solokeys-gui_<version>_<arch>.deb`. The RPM package is written to `dist/` as `solokeys-gui-<version>-1.<arch>.rpm`. The AppImage is written to `dist/` as `SoloKeys-GUI-<version>-x86_64.AppImage`.
+
+The AppImage registers the Chrome/Chromium and Firefox native messaging host per user. Browser manifests point to a stable wrapper under `~/.local/share/solokeys-gui/`, and that wrapper launches the AppImage in native-host mode. If you move the AppImage, start it once and the app will repair the browser registration. The AppImage does not install udev rules; install the rules manually or use the native `.deb`/`.rpm` package for system integration.
 
 ### macOS
 

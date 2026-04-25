@@ -169,6 +169,13 @@ class DeviceManager(QObject):
     
     def _close_device(self):
         """Close the device connection."""
+        try:
+            if self._ctap2 is not None and getattr(self._ctap2, "device", None) is not None:
+                close = getattr(self._ctap2.device, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            _log.debug("_close_device: close failed: %s", exc)
         self._ctap2 = None
         self._client_pin = None
         self._pin_token = None
@@ -194,6 +201,21 @@ class DeviceManager(QObject):
         if not self._open_device():
             return False
         return True
+
+    @staticmethod
+    def _is_retryable_channel_error(error: BaseException | str) -> bool:
+        """Return True for stale CTAP HID channel/handle errors."""
+        error_msg = str(error).lower()
+        return (
+            "wrong channel" in error_msg
+            or "wrong_channel" in error_msg
+            or "invalid channel" in error_msg
+            or "invalid_channel" in error_msg
+            or "6f00" in error_msg
+            or "0x6f00" in error_msg
+            or "device not available" in error_msg
+            or "not connected" in error_msg
+        )
     
     def _wait_for_device(self, timeout: float = 10.0) -> bool:
         """Wait for device to reappear after disconnect."""
@@ -302,8 +324,7 @@ class DeviceManager(QObject):
                         exc,
                     )
 
-            error_text = str(last_error).lower() if last_error else ""
-            if "wrong channel" not in error_text and "wrong_channel" not in error_text:
+            if last_error is None or not self._is_retryable_channel_error(last_error):
                 break
             if not self._reopen_device():
                 break
@@ -347,7 +368,7 @@ class DeviceManager(QObject):
             request.callback(result, None)
         except Exception as e:
             error_msg = str(e)
-            if "wrong channel" in error_msg.lower():
+            if self._is_retryable_channel_error(e):
                 if self._reopen_device():
                     try:
                         info = self._ctap2.get_info()
@@ -377,7 +398,7 @@ class DeviceManager(QObject):
             request.callback(retries, None)
         except Exception as e:
             error_msg = str(e)
-            if "wrong channel" in error_msg.lower():
+            if self._is_retryable_channel_error(e):
                 if self._reopen_device():
                     try:
                         if self._client_pin is None:
@@ -405,7 +426,7 @@ class DeviceManager(QObject):
             request.callback(True, None)
         except Exception as e:
             error_msg = str(e)
-            if "wrong_channel" in error_msg.lower():
+            if self._is_retryable_channel_error(e):
                 if self._reopen_device():
                     try:
                         self._ctap2.device.wink()
@@ -436,15 +457,7 @@ class DeviceManager(QObject):
             request.callback(response, None)
         except Exception as e:
             error_msg = str(e)
-            retryable = (
-                "wrong channel" in error_msg.lower()
-                or "wrong_channel" in error_msg.lower()
-                or "6f00" in error_msg.lower()
-                or "0x6f00" in error_msg.lower()
-                or "device not available" in error_msg.lower()
-                or "not connected" in error_msg.lower()
-            )
-            if retryable and self._reopen_device():
+            if self._is_retryable_channel_error(e) and self._reopen_device():
                 try:
                     command = request.args['command']
                     data = request.args['data']
@@ -502,7 +515,7 @@ class DeviceManager(QObject):
             request.callback(True, None)
         except Exception as e:
             error_msg = str(e)
-            if "wrong channel" in error_msg.lower():
+            if self._is_retryable_channel_error(e):
                 if self._reopen_device() and self._ctap2 is not None:
                     try:
                         _log.debug("_do_reset: retrying CTAP authenticatorReset after wrong channel")
@@ -592,6 +605,43 @@ class DeviceManager(QObject):
             return f"FIDO2 reset completed, but Secrets reset failed: {exc}"
 
         return None
+
+    def _collect_resident_credentials(self, operation_id: str) -> list[dict]:
+        """Read resident credentials through an authenticated CredentialManagement session."""
+        credentials = []
+        metadata = self._credman.get_metadata()
+        existing_count = metadata.get(CredentialManagement.RESULT.EXISTING_CRED_COUNT, 0)
+
+        if existing_count > 0:
+            self.operation_progress.emit(operation_id, 10, f"Found {existing_count} credentials")
+            rps = self._credman.enumerate_rps()
+
+            for idx, rp_data in enumerate(rps):
+                rp = rp_data.get(CredentialManagement.RESULT.RP)
+                rp_id_hash = rp_data.get(CredentialManagement.RESULT.RP_ID_HASH)
+
+                if not rp:
+                    continue
+
+                creds = self._credman.enumerate_creds(rp_id_hash)
+                for cred_data in creds:
+                    cred_id = cred_data.get(CredentialManagement.RESULT.CREDENTIAL_ID)
+                    user = cred_data.get(CredentialManagement.RESULT.USER)
+
+                    if cred_id and user:
+                        credentials.append({
+                            'cred_id': cred_id,
+                            'rp_id': rp.get('id', ''),
+                            'rp_name': rp.get('name', ''),
+                            'user_id': user.get('id', b'').hex() if isinstance(user.get('id'), bytes) else str(user.get('id', '')),
+                            'user_name': user.get('name', ''),
+                            'user_display_name': user.get('displayName', ''),
+                        })
+
+                progress = int(10 + (idx + 1) / len(rps) * 80)
+                self.operation_progress.emit(operation_id, progress, f"Loading credentials from {rp.get('name', 'Unknown')}...")
+
+        return credentials
     
     def _do_get_credentials(self, request: DeviceRequest):
         """Execute GET_CREDENTIALS request."""
@@ -606,42 +656,22 @@ class DeviceManager(QObject):
             return
         
         try:
-            credentials = []
-            metadata = self._credman.get_metadata()
-            existing_count = metadata.get(CredentialManagement.RESULT.EXISTING_CRED_COUNT, 0)
-            
-            if existing_count > 0:
-                self.operation_progress.emit(request.operation_id, 10, f"Found {existing_count} credentials")
-                rps = self._credman.enumerate_rps()
-                
-                for idx, rp_data in enumerate(rps):
-                    rp = rp_data.get(CredentialManagement.RESULT.RP)
-                    rp_id_hash = rp_data.get(CredentialManagement.RESULT.RP_ID_HASH)
-                    
-                    if not rp:
-                        continue
-                    
-                    creds = self._credman.enumerate_creds(rp_id_hash)
-                    for cred_data in creds:
-                        cred_id = cred_data.get(CredentialManagement.RESULT.CREDENTIAL_ID)
-                        user = cred_data.get(CredentialManagement.RESULT.USER)
-                        
-                        if cred_id and user:
-                            credentials.append({
-                                'cred_id': cred_id,
-                                'rp_id': rp.get('id', ''),
-                                'rp_name': rp.get('name', ''),
-                                'user_id': user.get('id', b'').hex() if isinstance(user.get('id'), bytes) else str(user.get('id', '')),
-                                'user_name': user.get('name', ''),
-                                'user_display_name': user.get('displayName', ''),
-                            })
-                    
-                    progress = int(10 + (idx + 1) / len(rps) * 80)
-                    self.operation_progress.emit(request.operation_id, progress, f"Loading credentials from {rp.get('name', 'Unknown')}...")
-            
+            credentials = self._collect_resident_credentials(request.operation_id)
             self.credentials_loaded.emit(request.operation_id, credentials)
             request.callback(credentials, None)
         except Exception as e:
+            if self._is_retryable_channel_error(e) and self._reopen_device():
+                self._pin_token = None
+                self._credman = None
+                if self._ensure_authenticated(pin):
+                    try:
+                        credentials = self._collect_resident_credentials(request.operation_id)
+                        self.credentials_loaded.emit(request.operation_id, credentials)
+                        request.callback(credentials, None)
+                        return
+                    except Exception as e2:
+                        request.callback(None, str(e2))
+                        return
             request.callback(None, str(e))
     
     def _do_delete_credential(self, request: DeviceRequest):
@@ -734,6 +764,22 @@ class DeviceManager(QObject):
             request.callback(False, str(e))
         except Exception as e:
             _log.debug("_do_set_pin: exception: %s", e)
+            if self._is_retryable_channel_error(e):
+                self._client_pin = None
+                if self._reopen_device():
+                    try:
+                        self._client_pin = ClientPin(self._ctap2)
+                        self._client_pin.set_pin(new_pin)
+                        self._cached_pin = None
+                        self._client_pin = None
+                        self._pin_token = None
+                        self._credman = None
+                        request.callback(True, None)
+                        return
+                    except Exception as e2:
+                        _log.debug("_do_set_pin: channel retry failed: %s", e2)
+                        request.callback(False, str(e2))
+                        return
             request.callback(False, str(e))
     
     def _do_browser_apdu(self, request: DeviceRequest):
@@ -752,15 +798,7 @@ class DeviceManager(QObject):
             request.callback(response, None)
         except Exception as e:
             error_msg = str(e)
-            retryable = (
-                "wrong channel" in error_msg.lower()
-                or "wrong_channel" in error_msg.lower()
-                or "6f00" in error_msg.lower()
-                or "0x6f00" in error_msg.lower()
-                or "device not available" in error_msg.lower()
-                or "not connected" in error_msg.lower()
-            )
-            if retryable and self._reopen_device():
+            if self._is_retryable_channel_error(e) and self._reopen_device():
                 try:
                     apdu_bytes = request.args['apdu_bytes']
                     if self._ctap2 is None and self._device is not None:
@@ -811,6 +849,21 @@ class DeviceManager(QObject):
                     return
             request.callback(False, str(e))
         except Exception as e:
+            if self._is_retryable_channel_error(e):
+                self._client_pin = None
+                if self._reopen_device():
+                    try:
+                        self._client_pin = ClientPin(self._ctap2)
+                        self._client_pin.change_pin(current_pin, new_pin)
+                        self._cached_pin = new_pin
+                        self._client_pin = None
+                        self._pin_token = None
+                        self._credman = None
+                        request.callback(True, None)
+                        return
+                    except Exception as e2:
+                        request.callback(False, str(e2))
+                        return
             request.callback(False, str(e))
     
     # Public API Methods
