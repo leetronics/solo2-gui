@@ -1,7 +1,5 @@
 """FIDO2 worker thread for SoloKeys GUI using DeviceManager."""
 
-from typing import Optional
-
 from PySide6.QtCore import QObject, Signal
 
 from solo2.fido2 import Fido2Credential
@@ -22,13 +20,11 @@ class Fido2Worker(QObject):
     def __init__(self):
         super().__init__()
         self._device_manager = DeviceManager.get_instance()
-        self._pin: Optional[str] = None
         self._current_op_id: str = ""
 
     def set_pin(self, pin: str) -> None:
-        """Set the PIN for authenticated operations."""
-        self._pin = pin
-        self._device_manager.set_cached_pin(pin)
+        """Deprecated compatibility hook; FIDO2 PINs are not cached."""
+        del pin
 
     def get_pin_status(self) -> None:
         """Get current PIN status and retry counters."""
@@ -59,6 +55,9 @@ class Fido2Worker(QObject):
                 # Get PIN retries separately if PIN is set
                 if status['pin_set']:
                     def on_retries(retries, err):
+                        # Retry counters are optional. Some platform/firmware
+                        # combinations reject GET_PIN_RETRIES even though
+                        # getInfo correctly reports clientPin=true.
                         if not err:
                             status['pin_retries'] = retries
                         self.pin_status_updated.emit(status)
@@ -69,9 +68,8 @@ class Fido2Worker(QObject):
         
         self._device_manager.get_info(on_info, operation_id=self._current_op_id)
 
-    def load_credentials(self, pin: Optional[str] = None) -> None:
+    def load_credentials(self, pin: str | None = None) -> None:
         """Load all FIDO2 credentials from the device."""
-        pin_to_use = pin or self._pin
         self._current_op_id = "fido2_load_creds"
         
         def on_loaded(credentials, error):
@@ -99,12 +97,10 @@ class Fido2Worker(QObject):
                 ))
             self.credentials_loaded.emit(cred_objects)
         
-        self._device_manager.get_credentials(pin_to_use, on_loaded, operation_id=self._current_op_id)
+        self._device_manager.get_credentials(pin, on_loaded, operation_id=self._current_op_id)
 
-    def delete_credential(self, credential: Fido2Credential, pin: Optional[str] = None) -> None:
+    def delete_credential(self, credential: Fido2Credential, pin: str | None = None) -> None:
         """Delete a FIDO2 credential from the device."""
-        pin_to_use = pin or self._pin
-        
         def on_deleted(result, error):
             if error:
                 self.credential_deleted.emit(False, str(error))
@@ -112,14 +108,13 @@ class Fido2Worker(QObject):
                 self.credential_deleted.emit(True, "")
         
         self._device_manager.delete_credential(
-            credential.cred_id, pin_to_use, on_deleted, operation_id="fido2_delete"
+            credential.cred_id, pin, on_deleted, operation_id="fido2_delete"
         )
 
-    def rename_credential(self, credential: Fido2Credential, new_name: str, 
-                         pin: Optional[str] = None) -> None:
+    def rename_credential(
+        self, credential: Fido2Credential, new_name: str, pin: str | None = None
+    ) -> None:
         """Rename a FIDO2 credential."""
-        pin_to_use = pin or self._pin
-        
         def on_renamed(result, error):
             if error:
                 self.credential_renamed.emit(False, str(error))
@@ -134,7 +129,7 @@ class Fido2Worker(QObject):
                 user_id = user_id.encode()
         
         self._device_manager.rename_credential(
-            credential.cred_id, new_name, user_id, pin_to_use, 
+            credential.cred_id, new_name, user_id, pin,
             on_renamed, operation_id="fido2_rename"
         )
 
@@ -151,10 +146,6 @@ class Fido2Worker(QObject):
                 else:
                     self.pin_changed.emit(False, f"Failed to set PIN: {error}")
             else:
-                # A freshly set PIN should be re-entered on the next privileged
-                # operation so the GUI establishes a clean auth session.
-                self._pin = None
-                self._device_manager.clear_cached_pin()
                 self.pin_changed.emit(True, "")
         
         self._device_manager.set_pin(new_pin, on_set, operation_id="fido2_set_pin")
@@ -174,8 +165,6 @@ class Fido2Worker(QObject):
                 else:
                     self.pin_changed.emit(False, f"Failed to change PIN: {error}")
             else:
-                self._pin = new_pin
-                self._device_manager.set_cached_pin(new_pin)
                 self.pin_changed.emit(True, "")
         
         self._device_manager.change_pin(current_pin, new_pin, on_changed, operation_id="fido2_change_pin")
