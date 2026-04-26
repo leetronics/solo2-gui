@@ -164,6 +164,7 @@ class Fido2Tab(QWidget):
         self._pin_set: bool = False
         self._refresh_after_pin_status: bool = False
         self._pending_pin_action: Optional[str] = None
+        self._suppress_next_pin_status_error: bool = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -343,6 +344,7 @@ class Fido2Tab(QWidget):
         self._status_label.setText("No device connected")
         self._refresh_after_pin_status = False
         self._pending_pin_action = None
+        self._suppress_next_pin_status_error = False
         self._transport_hint_label.setVisible(False)
         self._restart_admin_button.setVisible(False)
         self._set_buttons_enabled(False)
@@ -373,7 +375,13 @@ class Fido2Tab(QWidget):
         self._worker_thread.start()
 
         # Request PIN status after a short delay to ensure worker is ready
-        QTimer.singleShot(100, lambda: self._worker.get_pin_status() if self._worker else None)
+        QTimer.singleShot(100, lambda: self._request_pin_status(suppress_errors=True))
+
+    def _request_pin_status(self, *, suppress_errors: bool = False) -> None:
+        if not self._worker:
+            return
+        self._suppress_next_pin_status_error = suppress_errors
+        self._worker.get_pin_status()
 
     def _cleanup_worker(self) -> None:
         """Cleanup the worker thread."""
@@ -428,7 +436,7 @@ class Fido2Tab(QWidget):
 
         self._refresh_after_pin_status = True
         self._set_busy(True, "Checking current device state...")
-        self._worker.get_pin_status()
+        self._request_pin_status()
 
     def _load_credentials_after_status_refresh(self) -> None:
         """Load credentials after Refresh has synchronized live device state."""
@@ -479,8 +487,12 @@ class Fido2Tab(QWidget):
         )
 
         if ok and new_name and self._worker:
+            pin = self._prompt_for_pin("Enter your device PIN to rename this credential:")
+            if not pin:
+                self._status_label.setText("PIN entry cancelled")
+                return
             self._set_busy(True, "Renaming credential...")
-            self._worker.rename_credential(credential, new_name)
+            self._worker.rename_credential(credential, new_name, pin)
 
     def _delete_credential(self) -> None:
         """Delete the selected credential."""
@@ -501,8 +513,18 @@ class Fido2Tab(QWidget):
         )
 
         if reply == QMessageBox.Yes and self._worker:
+            pin = self._prompt_for_pin("Enter your device PIN to delete this credential:")
+            if not pin:
+                self._status_label.setText("PIN entry cancelled")
+                return
             self._set_busy(True, "Deleting credential...")
-            self._worker.delete_credential(credential)
+            self._worker.delete_credential(credential, pin)
+
+    def _prompt_for_pin(self, message: str) -> Optional[str]:
+        dialog = PinDialog(self, title="PIN Required", message=message)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return dialog.get_pin() or None
 
     def _change_pin(self) -> None:
         """Change the FIDO2 PIN."""
@@ -511,7 +533,7 @@ class Fido2Tab(QWidget):
 
         self._pending_pin_action = "change"
         self._set_busy(True, "Checking current PIN status...")
-        self._worker.get_pin_status()
+        self._request_pin_status()
 
     def _show_change_pin_dialog(self) -> None:
         dialog = ChangePinDialog(self, is_new_pin=False)
@@ -529,7 +551,7 @@ class Fido2Tab(QWidget):
 
         self._pending_pin_action = "set"
         self._set_busy(True, "Checking current PIN status...")
-        self._worker.get_pin_status()
+        self._request_pin_status()
 
     def _show_set_pin_dialog(self) -> None:
         dialog = ChangePinDialog(self, is_new_pin=True)
@@ -551,8 +573,7 @@ class Fido2Tab(QWidget):
         if dialog.exec() == QDialog.Accepted:
             pin = dialog.get_pin()
             if pin and self._worker:
-                # Pass PIN directly to load_credentials rather than pre-caching it.
-                # The worker caches it only on successful verification.
+                # Pass the PIN only for this credential-management operation.
                 self._set_busy(True, "Loading credentials...")
                 self._worker.load_credentials(pin)
         else:
@@ -563,8 +584,7 @@ class Fido2Tab(QWidget):
         if not self._worker:
             return
 
-        # Call get_pin_status on worker
-        self._worker.get_pin_status()
+        self._request_pin_status(suppress_errors=True)
 
     def _on_credential_deleted(self, success: bool, error: str) -> None:
         """Handle credential deletion result."""
@@ -596,6 +616,7 @@ class Fido2Tab(QWidget):
 
     def _on_pin_status_updated(self, status: dict) -> None:
         """Handle PIN status update."""
+        self._suppress_next_pin_status_error = False
         ctap2_available = status.get("ctap2_available", True)
         pin_set = status.get("pin_set", False)
         retries = status.get("pin_retries")
@@ -703,6 +724,13 @@ class Fido2Tab(QWidget):
         self._refresh_after_pin_status = False
         self._pending_pin_action = None
         self._set_busy(False)
+        self._change_pin_button.setEnabled(False)
+        self._set_pin_button.setEnabled(False)
+        if self._suppress_next_pin_status_error:
+            self._suppress_next_pin_status_error = False
+            self._status_label.setText(f"Could not refresh FIDO2 PIN status: {error}")
+            return
+        self._suppress_next_pin_status_error = False
         # PIN not set is informational, not an error
         if "PIN not set" in error:
             QMessageBox.information(self, "PIN Required", error)
