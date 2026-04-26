@@ -9,6 +9,10 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+concurrency:
+  group: build-desktop-artifacts-ci-latest
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Prepare Build Version
@@ -28,7 +32,7 @@ jobs:
     needs: prepare
 
     steps:
-      - name: Create or clear ci-latest draft release
+      - name: Recreate ci-latest draft release
         uses: actions/github-script@v7
         with:
           script: |
@@ -36,43 +40,53 @@ jobs:
             const repo = context.repo.repo;
             const tag = "ci-latest";
             const releaseName = "CI Latest";
+            const ref = `tags/${tag}`;
             const releases = await github.paginate(github.rest.repos.listReleases, {
               owner,
               repo,
               per_page: 100,
             });
 
-            let release = releases.find((candidate) => candidate.tag_name === tag);
+            const release = releases.find((candidate) => candidate.tag_name === tag);
 
-            if (!release) {
-              core.info(`Draft release ${tag} does not exist yet; creating it now.`);
-              const created = await github.rest.repos.createRelease({
+            if (release) {
+              core.info(`Deleting existing release ${release.id} for tag ${tag}.`);
+              await github.rest.repos.deleteRelease({
                 owner,
                 repo,
-                tag_name: tag,
-                name: releaseName,
-                draft: true,
-                prerelease: true,
-                make_latest: "false",
-              });
-              release = created.data;
-            } else {
-              core.info(`Using existing release ${release.id} for tag ${tag}.`);
-            }
-
-            if (!release.assets || release.assets.length === 0) {
-              core.info(`Release ${tag} has no assets to delete.`);
-              return;
-            }
-
-            for (const asset of release.assets) {
-              core.info(`Deleting old asset: ${asset.name}`);
-              await github.rest.repos.deleteReleaseAsset({
-                owner,
-                repo,
-                asset_id: asset.id,
+                release_id: release.id,
               });
             }
+
+            try {
+              core.info(`Deleting existing tag ref ${ref}.`);
+              await github.rest.git.deleteRef({ owner, repo, ref });
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+              core.info(`Tag ref ${ref} does not exist yet.`);
+            }
+
+            core.info(`Creating tag ${tag} at ${context.sha}.`);
+            await github.rest.git.createRef({
+              owner,
+              repo,
+              ref: `refs/${ref}`,
+              sha: context.sha,
+            });
+
+            core.info(`Creating draft release ${tag} for ${context.sha}.`);
+            await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: releaseName,
+              draft: true,
+              prerelease: true,
+              make_latest: "false",
+            });
 
   build-macos:
     name: macOS

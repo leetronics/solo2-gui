@@ -137,6 +137,7 @@ echo "Preparing AppDir..."
 install -d \
     "${APPDIR}/usr/bin" \
     "${APPDIR}/usr/lib/${APP_ID}" \
+    "${APPDIR}/usr/lib/gio/modules" \
     "${APPDIR}/usr/share/applications" \
     "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
 
@@ -160,6 +161,13 @@ set -eu
 
 APPDIR="$(dirname "$(readlink -f "$0")")"
 export SOLOKEYS_PATH="${SOLOKEYS_PATH:-auto}"
+
+# Keep bundled GLib/GIO from loading host gvfs modules. A newer host gvfs
+# module can otherwise resolve against the AppImage's older bundled libgio and
+# crash before the Qt event loop starts.
+export GIO_MODULE_DIR="${APPDIR}/usr/lib/gio/modules"
+export GIO_USE_VFS=local
+export NO_AT_BRIDGE=1
 
 if [ "${1:-}" = "--native-host" ]; then
     shift
