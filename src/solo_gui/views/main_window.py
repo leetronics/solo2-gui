@@ -252,6 +252,7 @@ class MainWindow(QMainWindow):
         self._refresh_timer.setInterval(500)
         self._refresh_timer.timeout.connect(self._run_expected_reconnect_scan)
         self._reconnect_scan_attempts_remaining = 0
+        self._shutdown_done = False
 
         # widget → sidebar button mapping (populated in _setup_tabs)
         self._tab_buttons: Dict[object, SidebarButton] = {}
@@ -282,11 +283,15 @@ class MainWindow(QMainWindow):
         self._update_thread.start()
         QTimer.singleShot(3000, self._check_for_updates)
 
-        # Clean up properly when the application actually quits
-        QApplication.instance().aboutToQuit.connect(self._quit_app)
+        # Clean up properly when the application actually quits.
+        QApplication.instance().aboutToQuit.connect(self._shutdown_app)
 
     def event(self, event) -> bool:
         return super().event(event)
+
+    def closeEvent(self, event) -> None:
+        self._shutdown_app()
+        super().closeEvent(event)
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("SoloKeys GUI")
@@ -742,9 +747,38 @@ class MainWindow(QMainWindow):
         elif manual:
             self._status_bar.showMessage("Up to date", 4000)
 
-    def _quit_app(self) -> None:
-        """Clean up and quit."""
-        self._update_thread.quit()
-        self._update_thread.wait()
+    def _shutdown_app(self) -> None:
+        """Stop all background workers before Qt destroys their QThread objects."""
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
+        self._refresh_timer.stop()
+        self._cleanup_tab_workers()
+
+        if self._update_thread and self._update_thread.isRunning():
+            self._update_thread.quit()
+            self._update_thread.wait()
+
         self._device_manager.stop()
         self._device_monitor.stop_monitoring()
+
+        if self._browser_server:
+            self._browser_server.stop()
+
+    def _cleanup_tab_workers(self) -> None:
+        """Best-effort cleanup for tab-owned QThreads."""
+        cleanup_calls = (
+            self._overview_tab._cleanup_firmware_worker,
+            self._fido2_tab._cleanup_worker,
+            self._piv_tab._cleanup_worker,
+            self._gpg_tab._cleanup_worker,
+            self._vault_tab._cleanup_worker,
+            self._admin_tab._cleanup_worker,
+            self._settings_tab._cleanup_worker,
+        )
+        for cleanup in cleanup_calls:
+            try:
+                cleanup()
+            except Exception:
+                pass
