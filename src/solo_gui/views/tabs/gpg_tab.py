@@ -836,6 +836,10 @@ class GpgTab(QWidget):
         self._set_busy(True, "Loading key status...")
         self._worker.load_status()
 
+    def _reload_status_after_pin_attempt(self) -> None:
+        """Refresh retry counters after operations that may consume a PIN retry."""
+        QTimer.singleShot(200, self._reload_status)
+
     # ------------------------------------------------------------------
     # Signal handlers
     # ------------------------------------------------------------------
@@ -895,6 +899,8 @@ class GpgTab(QWidget):
             QTimer.singleShot(200, self._reload_status)
         else:
             QMessageBox.critical(self, "Error", f"Failed to generate key: {error}")
+            if "PIN" in error or "verification failed" in error:
+                self._reload_status_after_pin_attempt()
 
     def _on_public_key_exported(
         self,
@@ -931,6 +937,7 @@ class GpgTab(QWidget):
             QTimer.singleShot(200, self._reload_status)
         else:
             QMessageBox.critical(self, "Import Failed", error or "Failed to import keys.")
+            self._reload_status_after_pin_attempt()
 
     def _on_pin_changed(self, success: bool, message: str) -> None:
         self._set_busy(False)
@@ -939,6 +946,7 @@ class GpgTab(QWidget):
             self._reload_status()
         else:
             QMessageBox.critical(self, "Error", message)
+            self._reload_status_after_pin_attempt()
 
     def _on_reset_completed(self, success: bool, message: str) -> None:
         self._set_busy(False)
