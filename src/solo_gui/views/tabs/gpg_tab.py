@@ -312,6 +312,55 @@ class GpgPinDialog(QDialog):
         return self._new_input.text()
 
 
+class SignTextDialog(QDialog):
+    """Dialog for signing arbitrary text with the OpenPGP SIG key."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sign Text")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Text to sign:"))
+
+        self._text_input = QTextEdit()
+        self._text_input.setPlaceholderText("Enter text to sign")
+        self._text_input.setMinimumHeight(120)
+        layout.addWidget(self._text_input)
+
+        form = QFormLayout()
+        self._pin_input = QLineEdit()
+        self._pin_input.setEchoMode(QLineEdit.Password)
+        self._pin_input.setPlaceholderText("User PIN / PW1")
+        form.addRow("User PIN:", self._pin_input)
+        layout.addLayout(form)
+
+        hint = QLabel("The text is hashed with SHA-256 and signed by the OpenPGP SIG key.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _validate_and_accept(self) -> None:
+        if not self._text_input.toPlainText():
+            QMessageBox.warning(self, "Text Required", "Please enter text to sign.")
+            return
+        if not self._pin_input.text():
+            QMessageBox.warning(self, "PIN Required", "Please enter the User PIN.")
+            return
+        self.accept()
+
+    def get_text(self) -> str:
+        return self._text_input.toPlainText()
+
+    def get_pin(self) -> str:
+        return self._pin_input.text()
+
+
 class ImportBundleDialog(QDialog):
     """Dialog for mapping imported secret keys onto OpenPGP slots."""
 
@@ -383,6 +432,7 @@ class KeySlotCard(QFrame):
     generate_requested = Signal(object)  # GpgKeySlot
     import_requested = Signal(object)    # GpgKeySlot
     export_requested = Signal(object)    # GpgKeySlot
+    sign_requested = Signal()
 
     def __init__(self, slot: GpgKeySlot, parent=None):
         super().__init__(parent)
@@ -442,12 +492,18 @@ class KeySlotCard(QFrame):
         self._btn_export.clicked.connect(lambda: self.export_requested.emit(self._slot))
         self._btn_export.setVisible(False)
 
+        self._btn_sign = QPushButton("Sign Text")
+        self._btn_sign.setToolTip("Sign arbitrary text with the OpenPGP SIG key")
+        self._btn_sign.clicked.connect(self.sign_requested.emit)
+        self._btn_sign.setVisible(False)
+
         row1.addWidget(badge_label)
         row1.addWidget(name_label)
         row1.addStretch()
         row1.addWidget(self._btn_generate)
         row1.addWidget(self._btn_import)
         row1.addWidget(self._btn_export)
+        row1.addWidget(self._btn_sign)
 
         # Row 2: status info
         row2 = QHBoxLayout()
@@ -493,10 +549,12 @@ class KeySlotCard(QFrame):
         )
 
     def _apply_action_styles(self) -> None:
-        primary_button = self._btn_export if self._has_key else (
-            self._btn_import if self._import_enabled else self._btn_generate
+        primary_button = self._btn_sign if (self._has_key and self._slot == GpgKeySlot.SIGN) else (
+            self._btn_export if self._has_key else (
+                self._btn_import if self._import_enabled else self._btn_generate
+            )
         )
-        for button in (self._btn_generate, self._btn_import, self._btn_export):
+        for button in (self._btn_generate, self._btn_import, self._btn_export, self._btn_sign):
             button.setStyleSheet(self._button_style(button is primary_button))
 
     def update_key_info(self, info: GpgKeyInfo) -> None:
@@ -504,6 +562,8 @@ class KeySlotCard(QFrame):
         colors = _get_card_colors()
         self._has_key = info.has_key
         self._btn_export.setVisible(info.has_key)
+        self._btn_sign.setVisible(info.has_key and self._slot == GpgKeySlot.SIGN)
+        self._btn_sign.setEnabled(self._controls_enabled and info.has_key and self._slot == GpgKeySlot.SIGN)
         self._apply_action_styles()
         if not info.has_key:
             self._status_label.setText("No key")
@@ -525,6 +585,7 @@ class KeySlotCard(QFrame):
         self._btn_generate.setEnabled(enabled)
         self._btn_export.setEnabled(enabled)
         self._btn_import.setEnabled(enabled and self._import_enabled)
+        self._btn_sign.setEnabled(enabled and self._has_key and self._slot == GpgKeySlot.SIGN)
         self._apply_action_styles()
 
     def set_import_enabled(self, enabled: bool) -> None:
@@ -611,6 +672,7 @@ class GpgTab(QWidget):
             card.generate_requested.connect(self._generate_key_for)
             card.import_requested.connect(self._import_key_for)
             card.export_requested.connect(self._export_pubkey_for)
+            card.sign_requested.connect(self._sign_text)
             self._slot_cards[slot] = card
             self._slot_infos[slot] = GpgKeyInfo(
                 slot=slot,
@@ -780,6 +842,7 @@ class GpgTab(QWidget):
         self._worker.key_generated.connect(self._on_key_generated)
         self._worker.public_key_exported.connect(self._on_public_key_exported)
         self._worker.keys_imported.connect(self._on_keys_imported)
+        self._worker.text_signed.connect(self._on_text_signed)
         self._worker.pin_changed.connect(self._on_pin_changed)
         self._worker.reset_completed.connect(self._on_reset_completed)
         self._worker.error_occurred.connect(self._on_error_occurred)
@@ -939,6 +1002,21 @@ class GpgTab(QWidget):
             QMessageBox.critical(self, "Import Failed", error or "Failed to import keys.")
             self._reload_status_after_pin_attempt()
 
+    def _on_text_signed(self, success: bool, message: str, signature: str) -> None:
+        self._set_busy(False)
+        if success:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("Text Signed")
+            box.setText(message or "Text signed successfully")
+            box.setInformativeText("The Base64 signature is available in the details.")
+            box.setDetailedText(signature)
+            box.exec()
+            self._reload_status()
+        else:
+            QMessageBox.critical(self, "Sign Text Failed", message or "Failed to sign text.")
+            self._reload_status_after_pin_attempt()
+
     def _on_pin_changed(self, success: bool, message: str) -> None:
         self._set_busy(False)
         if success:
@@ -1094,6 +1172,18 @@ class GpgTab(QWidget):
         name, badge = _SLOT_META.get(slot, (str(slot), "??"))
         self._set_busy(True, f"Reading public key from {name} ({badge}) slot...")
         self._worker.export_public_key(slot)
+
+    def _sign_text(self) -> None:
+        if not self._worker:
+            return
+        sign_info = self._slot_infos.get(GpgKeySlot.SIGN)
+        if sign_info is None or not sign_info.has_key:
+            QMessageBox.warning(self, "No Signing Key", "Generate or import a Sign (SIG) key first.")
+            return
+        dialog = SignTextDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            self._set_busy(True, "Signing text...")
+            self._worker.sign_text(dialog.get_text(), dialog.get_pin())
 
     def _choose_import_source(self) -> tuple[Optional[str], Optional[str]]:
         if not self._gnupg_import_available:

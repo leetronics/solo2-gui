@@ -12,6 +12,7 @@ To enable full OpenPGP functionality:
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+import base64
 import hashlib
 import os
 import shutil
@@ -40,6 +41,7 @@ INS_PUT_DATA = 0xDA
 INS_PUT_DATA_ODD = 0xDB
 INS_VERIFY = 0x20
 INS_CHANGE_REFERENCE_DATA = 0x24
+INS_PSO = 0x2A
 INS_TERMINATE_DF = 0xE6
 INS_ACTIVATE_FILE = 0x44
 INS_GENERATE_ASYM_KEY = 0x47
@@ -315,6 +317,11 @@ def _strip_optional_pubkey_import_byte(attrs: List[int] | Tuple[int, ...]) -> Tu
     return tuple(attrs)
 
 
+def _sha256_digest_info(digest: bytes) -> bytes:
+    """Return ASN.1 DigestInfo for SHA-256, used by RSA OpenPGP signatures."""
+    return bytes.fromhex("3031300d060960864801650304020105000420") + digest
+
+
 def _get_algo_attrs_for_slot(spec: OpenPgpAlgoSpec, slot: GpgKeySlot) -> Optional[Tuple[int, ...]]:
     if slot == GpgKeySlot.DECRYPT:
         return spec.decrypt_attrs
@@ -457,6 +464,7 @@ class GpgWorker(QObject):
     key_generated = Signal(bool, str, bytes, object, object)  # success, error, pubkey_bytes, slot, algo
     public_key_exported = Signal(bool, str, bytes, object, object)  # success, error, raw pubkey bytes, slot, algo
     keys_imported = Signal(bool, str, object)       # success, error, list[GpgKeySlot]
+    text_signed = Signal(bool, str, str)            # success, message, base64 signature
     pin_changed = Signal(bool, str)                 # success, message
     reset_completed = Signal(bool, str)             # success, message
     error_occurred = Signal(str)
@@ -1024,6 +1032,54 @@ class GpgWorker(QObject):
         except Exception as e:
             self._disconnect()
             self.key_generated.emit(False, str(e), b"", slot, algo_name)
+
+    def sign_text(self, text: str, user_pin: str) -> None:
+        """Sign UTF-8 text with the OpenPGP SIG key after verifying PW1."""
+        if not PCSC_AVAILABLE:
+            self.text_signed.emit(False, "PCSC not available", "")
+            return
+        try:
+            if not self._connect():
+                self.text_signed.emit(False, "Cannot connect to card reader", "")
+                return
+            if not self._select_gpg_aid():
+                self._disconnect()
+                self.text_signed.emit(False, "OpenPGP applet not found", "")
+                return
+
+            sign_info = next(
+                (info for info in self._read_key_infos() if info.slot == GpgKeySlot.SIGN),
+                None,
+            )
+            if sign_info is None or not sign_info.has_key:
+                self._disconnect()
+                self.text_signed.emit(False, "No OpenPGP signing key is present", "")
+                return
+
+            pin_bytes = list(user_pin.encode("utf-8"))
+            _, sw1, sw2 = self._send_apdu(0x00, INS_VERIFY, 0x00, 0x81, pin_bytes)
+            if not (sw1 == 0x90 and sw2 == 0x00):
+                self._disconnect()
+                self.text_signed.emit(
+                    False, f"User PIN rejected: {self._sw_to_str(sw1, sw2)}", ""
+                )
+                return
+
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            data = list(_sha256_digest_info(digest)) if sign_info.algo == "RSA" else list(digest)
+            signature, sw1, sw2 = self._send_apdu(0x00, INS_PSO, 0x9E, 0x9A, data, 0)
+            self._disconnect()
+            if sw1 == 0x90 and sw2 == 0x00:
+                self.text_signed.emit(
+                    True,
+                    f"Signed SHA-256 digest with {sign_info.algo or 'the OpenPGP SIG key'}",
+                    base64.b64encode(bytes(signature)).decode("ascii"),
+                )
+            else:
+                self.text_signed.emit(False, f"Signing failed: {self._sw_to_str(sw1, sw2)}", "")
+        except Exception as e:
+            self._disconnect()
+            self.text_signed.emit(False, str(e), "")
 
     def change_user_pin(self, old_pin: str, new_pin: str) -> None:
         """Change User PIN (PW1, P2=81)."""
