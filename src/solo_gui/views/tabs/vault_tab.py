@@ -29,9 +29,10 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QTabWidget,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QResizeEvent
 
 from solo_gui.models.device import SoloDevice, firmware_supports_extended_applets
 from solo_gui.workers.totp_worker import (
@@ -93,6 +94,43 @@ def _format_vault_version(version: str) -> str:
     return version
 
 
+class MiddleElideLabel(QLabel):
+    """QLabel that keeps the start and end visible when the text is too wide."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self._full_text = text
+        self.setToolTip(text)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._update_text()
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_text()
+
+    def setFont(self, font: QFont) -> None:
+        super().setFont(font)
+        self._update_text()
+
+    def _update_text(self) -> None:
+        width = max(0, self.contentsRect().width())
+        if width:
+            self.setText(self.fontMetrics().elidedText(self._full_text, Qt.ElideMiddle, width))
+        else:
+            self.setText(self._full_text)
+
+
 class CredentialCard(QFrame):
     """A card widget representing a single credential."""
 
@@ -125,38 +163,14 @@ class CredentialCard(QFrame):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setSpacing(1)
 
-        # --- Left side ---
-        left = QHBoxLayout()
-        left.setSpacing(6)
-
-        name_label = QLabel(credential.name)
+        name_label = MiddleElideLabel(credential.name)
         name_font = QFont()
-        name_font.setBold(True)
-        name_font.setPointSize(11)
+        name_font.setBold(False)
+        name_font.setPointSize(10)
         name_label.setFont(name_font)
-        left.addWidget(name_label)
-
-        badges = []
-        if credential.password_only:
-            badges.append("Password")
-        else:
-            if credential.is_otp:
-                badges.append(credential.kind_name)
-            elif credential.other:
-                badges.append(str(credential.other))
-            if credential.has_password_safe:
-                badges.append("Password")
-        if not badges:
-            badges.append("Secret")
-        for badge_text in badges:
-            type_badge = QLabel(badge_text)
-            type_badge.setStyleSheet(
-                "font-size: 10px; color: #555; padding: 1px 5px;"
-                " border: 1px solid #ccc; border-radius: 3px;"
-            )
-            left.addWidget(type_badge)
+        layout.addWidget(name_label, stretch=1)
 
         # Protection badge
         if credential.protected or credential.touch_required:
@@ -167,16 +181,9 @@ class CredentialCard(QFrame):
                 parts.append("Touch")
             prot_badge = QLabel("+".join(parts))
             prot_badge.setStyleSheet(
-                "font-size: 10px; color: #2196F3; padding: 1px 5px;"
-                " border: 1px solid #90caf9; border-radius: 3px;"
+                "font-size: 9px; color: #1f6fb2; padding: 0 2px;"
             )
-            left.addWidget(prot_badge)
-
-        left.addStretch()
-
-        # --- Right side ---
-        right = QHBoxLayout()
-        right.setSpacing(4)
+            layout.addWidget(prot_badge)
 
         # Code button (clickable to copy)
         self._code_btn = QPushButton("\u2500\u2500\u2500\u2500\u2500\u2500")
@@ -192,7 +199,7 @@ class CredentialCard(QFrame):
         self._code_btn.setCursor(Qt.ArrowCursor)
         self._code_btn.clicked.connect(self._copy_code)
         if credential.is_otp:
-            right.addWidget(self._code_btn)
+            layout.addWidget(self._code_btn)
 
         # Copy symbol button
         copy_btn = QPushButton("\u2398")
@@ -205,7 +212,7 @@ class CredentialCard(QFrame):
         )
         copy_btn.clicked.connect(self._copy_code)
         if credential.is_otp:
-            right.addWidget(copy_btn)
+            layout.addWidget(copy_btn)
 
         # Generate button
         self._gen_btn = QPushButton("\u25b6")
@@ -217,7 +224,7 @@ class CredentialCard(QFrame):
         )
         self._gen_btn.clicked.connect(lambda: self.generate_requested.emit(self._credential))
         if credential.is_otp:
-            right.addWidget(self._gen_btn)
+            layout.addWidget(self._gen_btn)
 
         button_style = (
             "QPushButton { color: #777; border: none; border-radius: 4px; }"
@@ -230,28 +237,28 @@ class CredentialCard(QFrame):
             load_btn.setToolTip("Load password data")
             load_btn.setStyleSheet(button_style)
             load_btn.clicked.connect(lambda: self.load_password_requested.emit(self._credential))
-            right.addWidget(load_btn)
+            layout.addWidget(load_btn)
 
             login_btn = QPushButton("\U0001f464")
             login_btn.setFixedSize(28, 28)
             login_btn.setToolTip("Copy login")
             login_btn.setStyleSheet(button_style)
             login_btn.clicked.connect(lambda: self.copy_login_requested.emit(self._credential))
-            right.addWidget(login_btn)
+            layout.addWidget(login_btn)
 
             password_btn = QPushButton("\U0001f511")
             password_btn.setFixedSize(28, 28)
             password_btn.setToolTip("Copy password")
             password_btn.setStyleSheet(button_style)
             password_btn.clicked.connect(lambda: self.copy_password_requested.emit(self._credential))
-            right.addWidget(password_btn)
+            layout.addWidget(password_btn)
 
         edit_btn = QPushButton("\u270e")
         edit_btn.setFixedSize(28, 28)
         edit_btn.setToolTip("Edit credential")
         edit_btn.setStyleSheet(button_style)
         edit_btn.clicked.connect(lambda: self.edit_password_requested.emit(self._credential))
-        right.addWidget(edit_btn)
+        layout.addWidget(edit_btn)
 
         # Delete button
         del_btn = QPushButton("\u2715")
@@ -262,10 +269,7 @@ class CredentialCard(QFrame):
             "QPushButton:hover { background: #ffeaea; }"
         )
         del_btn.clicked.connect(lambda: self.delete_requested.emit(self._credential))
-        right.addWidget(del_btn)
-
-        layout.addLayout(left, stretch=1)
-        layout.addLayout(right)
+        layout.addWidget(del_btn)
 
     @property
     def credential(self) -> Credential:
