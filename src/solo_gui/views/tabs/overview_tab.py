@@ -55,7 +55,7 @@ class OverviewTab(QWidget):
         self._check_variant_btn = QPushButton("Check Variant")
         self._check_variant_btn.setToolTip(
             "Probe the hardware to confirm the device variant and lock state.\n"
-            "The device will reboot to bootloader mode — touch the button when prompted."
+            "The device will reboot to bootloader mode — touch the Solo 2 button when prompted."
         )
         self._check_variant_btn.clicked.connect(self.check_variant_requested)
         self._check_variant_btn.setEnabled(False)
@@ -249,7 +249,7 @@ class OverviewTab(QWidget):
             self,
             "Confirm Firmware Update",
             f"Update firmware to version {self._firmware_info.version}?\n\n"
-            "After you click Yes, watch the SoloKey and press its button when it "
+            "After you click Yes, watch the Solo 2 and press its button when it "
             "asks for touch confirmation to enter bootloader mode.\n\n"
             "Do not disconnect the device during this process.",
             QMessageBox.Yes | QMessageBox.No,
@@ -257,6 +257,7 @@ class OverviewTab(QWidget):
         )
         if reply == QMessageBox.Yes:
             self._set_busy(True, "Starting firmware update...")
+            self._show_touch_prompt()
             self._check_updates_button.setEnabled(False)
             self._perform_update_requested.emit(self._firmware_info)
 
@@ -278,7 +279,7 @@ class OverviewTab(QWidget):
             self,
             "Flash Firmware",
             f"Flash firmware from:\n{path}\n\n"
-            "After you click Yes, watch the SoloKey and press its button when it "
+            "After you click Yes, watch the Solo 2 and press its button when it "
             "asks for touch confirmation to enter bootloader mode.\n\n"
             "Do not disconnect during the process.",
             QMessageBox.Yes | QMessageBox.No,
@@ -286,6 +287,7 @@ class OverviewTab(QWidget):
         )
         if reply == QMessageBox.Yes:
             self._set_busy(True, "Flashing firmware…")
+            self._show_touch_prompt()
             self._check_updates_button.setEnabled(False)
             self._flash_file_btn.setEnabled(False)
             self._flash_from_file_requested.emit(path)
@@ -307,7 +309,7 @@ class OverviewTab(QWidget):
     def _on_firmware_progress(self, progress: int, message: str) -> None:
         self._status_progress.setVisible(True)
         self._status_progress.setValue(progress)
-        if "press the SoloKey button now" in message:
+        if "press the Solo 2 button now" in message:
             self._show_touch_prompt()
         elif "Bootloader connected" in message or message.startswith(("Erasing", "Writing")):
             self._hide_touch_prompt()
@@ -377,10 +379,10 @@ class OverviewTab(QWidget):
             return
 
         msg = QMessageBox(self)
-        msg.setWindowTitle("Touch SoloKey")
+        msg.setWindowTitle("Touch Solo 2")
         msg.setIcon(QMessageBox.Information)
         msg.setText(
-            "Press the SoloKey button now to confirm entering bootloader mode.\n\n"
+            "Press the Solo 2 button now to confirm entering bootloader mode.\n\n"
             "This message closes automatically when the bootloader is detected "
             "or the operation times out."
         )

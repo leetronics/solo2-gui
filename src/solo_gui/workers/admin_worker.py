@@ -218,12 +218,12 @@ class AdminWorker(QObject):
 
         self.operation_progress.emit(
             10,
-            "Waiting for bootloader — press the SoloKey button now if it is blinking…",
+            "Waiting for bootloader — press the Solo 2 button now if it is blinking…",
         )
         if not self._wait_for_bootloader(timeout_s=20.0):
             self.error_occurred.emit(
                 "Bootloader device did not appear within 20 s.\n"
-                "Make sure the device is connected, press the SoloKey button when "
+                "Make sure the device is connected, press the Solo 2 button when "
                 "it asks for touch confirmation, "
                 "and try again."
             )

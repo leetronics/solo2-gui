@@ -84,6 +84,9 @@ class AdminTab(QWidget):
     reconnect_prepare = Signal()  # prepare monitor + pause polling (ISP check starting)
     isp_done = Signal()           # ISP check finished — resume monitor polling
     variant_detected = Signal(str)  # forwarded to overview tab
+    _check_variant_requested = Signal()
+    _unlock_requested = Signal(str)
+    _relock_requested = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -283,10 +286,23 @@ class AdminTab(QWidget):
         self._admin_worker.variant_ready.connect(self._on_variant_ready)
         self._admin_worker.unlock_ready.connect(self._on_unlock_ready)
         self._admin_worker.relock_ready.connect(self._on_relock_ready)
+        self._check_variant_requested.connect(self._admin_worker.check_variant)
+        self._unlock_requested.connect(self._admin_worker.unlock_device)
+        self._relock_requested.connect(self._admin_worker.relock_device)
         self._worker_thread.start()
 
     def _cleanup_worker(self) -> None:
         self._hide_touch_prompt()
+        if self._admin_worker:
+            for signal, slot in (
+                (self._check_variant_requested, self._admin_worker.check_variant),
+                (self._unlock_requested, self._admin_worker.unlock_device),
+                (self._relock_requested, self._admin_worker.relock_device),
+            ):
+                try:
+                    signal.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
         if self._worker_thread:
             self._worker_thread.quit()
             self._worker_thread.wait()
@@ -387,7 +403,7 @@ class AdminTab(QWidget):
         if already_in_bootloader:
             # Device is already in bootloader — ISP probe runs without rebooting,
             # and the device is left in bootloader so "Unlock Device" works immediately.
-            self._admin_worker.check_variant()
+            self._check_variant_requested.emit()
             return
 
         reply = QMessageBox.question(
@@ -395,7 +411,7 @@ class AdminTab(QWidget):
             "Check Device Variant",
             "This will reboot the device to bootloader mode, probe the hardware, "
             "then reboot back to firmware.\n\n"
-            "Touch the device button when prompted to confirm the reboot.\n\n"
+            "Touch the Solo 2 button when prompted to confirm the reboot.\n\n"
             "The device will disconnect briefly. Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -403,7 +419,8 @@ class AdminTab(QWidget):
         if reply == QMessageBox.Yes:
             self._isp_monitoring_paused = True
             self.reconnect_prepare.emit()
-            self._admin_worker.check_variant()
+            self._show_touch_prompt()
+            self._check_variant_requested.emit()
 
     def _unlock_device(self) -> None:
         if not self._admin_worker:
@@ -415,7 +432,7 @@ class AdminTab(QWidget):
             "After unlocking, unsigned (custom) firmware can be flashed freely.\n\n"
             "WARNING: Restoring factory Secure Boot is not currently supported.\n"
             "Only proceed if you intend to run custom firmware on this device.\n\n"
-            "After you click Yes, watch the SoloKey and press its button when it "
+            "After you click Yes, watch the Solo 2 and press its button when it "
             "asks for touch confirmation to enter bootloader mode.\n\n"
             "Continue?",
             QMessageBox.Yes | QMessageBox.No,
@@ -426,7 +443,8 @@ class AdminTab(QWidget):
 
         self._isp_monitoring_paused = True
         self.reconnect_prepare.emit()
-        self._admin_worker.unlock_device()
+        self._show_touch_prompt()
+        self._unlock_requested.emit("")
 
     def _reboot(self, mode: RebootMode) -> None:
         mode_name = "bootloader" if mode == RebootMode.BOOTLOADER else "normal"
@@ -490,9 +508,9 @@ class AdminTab(QWidget):
     def _on_operation_progress(self, progress: int, message: str) -> None:
         self._status_progress.setValue(progress)
         self._status_label.setText(message)
-        if "press the SoloKey button now" in message:
+        if self._is_touch_prompt_message(message):
             self._show_touch_prompt()
-        elif "Reading" in message or "Writing" in message or "Done" in message:
+        elif "Reading" in message or "Writing" in message or "Probing" in message or "Done" in message:
             self._hide_touch_prompt()
 
     def _on_operation_completed(self, success: bool, message: str) -> None:
@@ -515,10 +533,10 @@ class AdminTab(QWidget):
             return
 
         msg = QMessageBox(self)
-        msg.setWindowTitle("Touch SoloKey")
+        msg.setWindowTitle("Touch Solo 2")
         msg.setIcon(QMessageBox.Information)
         msg.setText(
-            "Press the SoloKey button now to confirm entering bootloader mode.\n\n"
+            "Press the Solo 2 button now to confirm entering bootloader mode.\n\n"
             "This message closes automatically when the device enters bootloader "
             "mode or the operation times out."
         )
@@ -528,6 +546,14 @@ class AdminTab(QWidget):
         self._touch_prompt = msg
         msg.show()
         QTimer.singleShot(22000, self._hide_touch_prompt)
+
+    @staticmethod
+    def _is_touch_prompt_message(message: str) -> bool:
+        return (
+            "press the Solo 2 button now" in message
+            or "Rebooting to bootloader" in message
+            or "Waiting for bootloader" in message
+        )
 
     def _hide_touch_prompt(self) -> None:
         if self._touch_prompt is None:
@@ -620,7 +646,7 @@ class AdminTab(QWidget):
 
         self._isp_monitoring_paused = True
         self.reconnect_prepare.emit()
-        self._admin_worker.relock_device(cmpa_path)
+        self._relock_requested.emit(cmpa_path)
 
     def _on_unlock_ready(self) -> None:
         if self._isp_monitoring_paused:

@@ -27,12 +27,12 @@ jobs:
         run: echo "build_version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
   prepare-ci-release:
-    name: Prepare ci-latest Draft Release
+    name: Prepare ci-latest Pre-Release
     runs-on: ubuntu-22.04
     needs: prepare
 
     steps:
-      - name: Recreate ci-latest draft release
+      - name: Recreate ci-latest pre-release
         uses: actions/github-script@v7
         with:
           script: |
@@ -76,14 +76,14 @@ jobs:
               sha: context.sha,
             });
 
-            core.info(`Creating draft release ${tag} for ${context.sha}.`);
+            core.info(`Creating pre-release ${tag} for ${context.sha}.`);
             await github.rest.repos.createRelease({
               owner,
               repo,
               tag_name: tag,
               target_commitish: context.sha,
               name: releaseName,
-              draft: true,
+              draft: false,
               prerelease: true,
               make_latest: "false",
             });
@@ -190,12 +190,12 @@ jobs:
           chmod +x build_macos.sh
           ./build_macos.sh
 
-      - name: Upload macOS to draft release
+      - name: Upload macOS to pre-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ci-latest
           name: CI Latest
-          draft: true
+          draft: false
           prerelease: true
           make_latest: false
           overwrite_files: true
@@ -243,12 +243,12 @@ jobs:
         shell: cmd
         run: build_windows.bat
 
-      - name: Upload Windows to draft release
+      - name: Upload Windows to pre-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ci-latest
           name: CI Latest
-          draft: true
+          draft: false
           prerelease: true
           make_latest: false
           overwrite_files: true
@@ -284,12 +284,12 @@ jobs:
           ./build_linux_rpm.sh
           ./build_linux_appimage.sh
 
-      - name: Upload Linux to draft release
+      - name: Upload Linux to pre-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ci-latest
           name: CI Latest
-          draft: true
+          draft: false
           prerelease: true
           make_latest: false
           overwrite_files: true

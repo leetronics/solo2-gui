@@ -319,20 +319,20 @@ class FirmwareUpdateWorker(QObject):
             AdminSession(self._device).reboot(RebootMode.BOOTLOADER)
             self.update_progress.emit(
                 52,
-                "Reboot command accepted — press the SoloKey button now if it is blinking",
+                "Reboot command accepted — press the Solo 2 button now if it is blinking",
             )
         except Exception:
             self.update_progress.emit(52, "Reboot command sent (no confirmation)")
 
         self.update_progress.emit(
             54,
-            "Waiting for bootloader — press the SoloKey button now if it is asking for touch",
+            "Waiting for bootloader — press the Solo 2 button now if it is asking for touch",
         )
         time.sleep(2.0)
 
         self.update_progress.emit(
             56,
-            "Searching for bootloader device — keep the SoloKey connected",
+            "Searching for bootloader device — keep the Solo 2 connected",
         )
 
         def _progress(written: int, total_bytes: int) -> None:
