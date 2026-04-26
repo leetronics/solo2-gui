@@ -48,7 +48,6 @@ linux_pkg_prepare_root "${PKG_ROOT}" "${APP_VERSION}" "${WORK_DIR}"
 install -d "${PKG_ROOT}/DEBIAN"
 install -m 0755 "packaging/linux/debian/postinst" "${PKG_ROOT}/DEBIAN/postinst"
 install -m 0755 "packaging/linux/debian/postrm" "${PKG_ROOT}/DEBIAN/postrm"
-install -m 0644 "packaging/linux/debian/triggers" "${PKG_ROOT}/DEBIAN/triggers"
 
 INSTALLED_SIZE="$(du -sk "${PKG_ROOT}" | cut -f1)"
 cat > "${PKG_ROOT}/DEBIAN/control" <<EOF
@@ -59,7 +58,7 @@ Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: SoloKeys GUI Team
 Installed-Size: ${INSTALLED_SIZE}
-Depends: python3 (>= 3.10), python3-pip, libusb-1.0-0, python3-pyside6.qtcore, python3-pyside6.qtgui, python3-pyside6.qtwidgets
+Depends: libusb-1.0-0
 Recommends: pcscd
 Description: Desktop GUI for managing Solo 2 devices
  Manage your Solo 2 device, FIDO2 resident credentials, Secrets/TOTP entries,

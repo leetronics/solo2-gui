@@ -10,6 +10,9 @@ INSTALL_LIBDIR="/usr/lib/solokeys-gui"
 BUILD_VERSION_FILE="${REPO_ROOT}/src/solo_gui/_build_version.py"
 SOLO2_REPO_URL="https://github.com/leetronics/solo2-python.git"
 SOLO2_REPO_REF="${SOLO2_PYTHON_REF:-main}"
+GUI_APP_NAME="SoloKeys GUI"
+NATIVE_HOST_NAME="solokeys-secrets-host"
+LINUX_PKG_BUILD_PYTHON=""
 
 linux_pkg_require_command() {
     local cmd="$1"
@@ -61,28 +64,74 @@ linux_pkg_find_solo2_root() {
     printf '%s\n' "${candidate}"
 }
 
+linux_pkg_install_pyinstaller_build_deps() {
+    local work_dir="$1"
+    local solo2_root
+    local requirements_file="${work_dir}/requirements-linux-package.txt"
+    local venv_dir="${work_dir}/pyinstaller-venv"
+
+    echo "Creating temporary Python build environment..."
+    python3 -m venv "${venv_dir}"
+    LINUX_PKG_BUILD_PYTHON="${venv_dir}/bin/python"
+    solo2_root="$(linux_pkg_find_solo2_root "${work_dir}")"
+    grep -v '^solo2 @' "${REPO_ROOT}/requirements.txt" > "${requirements_file}"
+
+    echo "Installing PyInstaller build dependencies..."
+    "${LINUX_PKG_BUILD_PYTHON}" -m pip install --upgrade pip
+    "${LINUX_PKG_BUILD_PYTHON}" -m pip install \
+        --requirement "${requirements_file}" \
+        "hidapi>=0.14.0.post2" \
+        "pyinstaller>=6.2.0"
+    "${LINUX_PKG_BUILD_PYTHON}" -m pip install --editable "${solo2_root}"
+}
+
+linux_pkg_build_pyinstaller_payload() {
+    local pkg_root="$1"
+    local app_version="$2"
+    local work_dir="$3"
+    local gui_dir="${REPO_ROOT}/dist/${GUI_APP_NAME}"
+    local gui_exe="${gui_dir}/${GUI_APP_NAME}"
+    local host_exe="${REPO_ROOT}/dist/${NATIVE_HOST_NAME}"
+
+    linux_pkg_install_pyinstaller_build_deps "${work_dir}"
+    "${LINUX_PKG_BUILD_PYTHON}" "${REPO_ROOT}/scripts/app_version.py" write-build-module --version "${app_version}" >/dev/null
+
+    echo "Cleaning previous PyInstaller build artifacts..."
+    rm -rf "${REPO_ROOT}/build"
+    rm -rf "${gui_dir}"
+    rm -rf "${host_exe}"
+
+    echo "Running PyInstaller for GUI..."
+    (cd "${REPO_ROOT}" && SOLOKEYS_GUI_VERSION="${app_version}" "${LINUX_PKG_BUILD_PYTHON}" -m PyInstaller --clean --noconfirm solokeys_gui.spec)
+    if [[ ! -d "${gui_dir}" || ! -x "${gui_exe}" ]]; then
+        echo "Error: PyInstaller did not produce executable ${gui_exe}" >&2
+        exit 1
+    fi
+
+    echo "Running PyInstaller for native host..."
+    (cd "${REPO_ROOT}" && "${LINUX_PKG_BUILD_PYTHON}" -m PyInstaller --clean --noconfirm native_host.spec)
+    if [[ ! -x "${host_exe}" ]]; then
+        echo "Error: PyInstaller did not produce executable ${host_exe}" >&2
+        exit 1
+    fi
+
+    # Match AppImage runtime hardening: avoid fragile host input-method modules.
+    rm -f \
+        "${gui_dir}/_internal/PySide6/Qt/plugins/platforminputcontexts/libibusplatforminputcontextplugin.so"
+    rm -f "${gui_dir}/_internal/libxkbcommon.so.0"
+
+    mkdir -p "${pkg_root}${INSTALL_LIBDIR}"
+    cp -R "${gui_dir}/." "${pkg_root}${INSTALL_LIBDIR}/"
+    mv "${pkg_root}${INSTALL_LIBDIR}/${GUI_APP_NAME}" "${pkg_root}${INSTALL_LIBDIR}/solokeys-gui-bin"
+    install -m 0755 "${host_exe}" "${pkg_root}${INSTALL_LIBDIR}/${NATIVE_HOST_NAME}"
+}
+
 linux_pkg_prepare_root() {
     local pkg_root="$1"
     local app_version="$2"
     local work_dir="$3"
-    local solo2_root
 
-    solo2_root="$(linux_pkg_find_solo2_root "${work_dir}")"
-
-    mkdir -p "${pkg_root}${INSTALL_LIBDIR}"
-    python3 "${REPO_ROOT}/scripts/app_version.py" write-build-module --version "${app_version}" >/dev/null
-
-    cp -R "${REPO_ROOT}/src/solo_gui" "${pkg_root}${INSTALL_LIBDIR}/"
-    cp -R "${solo2_root}/src/solo2" "${pkg_root}${INSTALL_LIBDIR}/"
-
-    find "${pkg_root}${INSTALL_LIBDIR}" -type d -name "__pycache__" -prune -exec rm -rf {} +
-    find "${pkg_root}${INSTALL_LIBDIR}" -type f -name "*.pyc" -delete
-
-    install -m 0644 "${SCRIPT_DIR}/requirements-bundled.txt" \
-        "${pkg_root}${INSTALL_LIBDIR}/requirements-bundled.txt"
-
-    rm -f "${pkg_root}${INSTALL_LIBDIR}/solo_gui/debug.txt"
-    rm -f "${pkg_root}${INSTALL_LIBDIR}/solo_gui/solokeys_secrets_host.sh"
+    linux_pkg_build_pyinstaller_payload "${pkg_root}" "${app_version}" "${work_dir}"
 
     install -d "${pkg_root}/usr/bin"
     sed \

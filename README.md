@@ -44,7 +44,7 @@ If you are developing `solo2-python` and this GUI side by side, the GUI source t
 
 ### Linux
 
-For Linux, the preferred end-user paths are native packages: `.deb` for Debian/Ubuntu-style systems and `.rpm` for Fedora/openSUSE-style systems. These packages install the SoloKeys code, launcher, native messaging host and udev rules. Most Python dependencies (fido2, pyusb, qtawesome, pyscard, hidapi, etc.) are installed automatically via pip into a private `site-packages` directory at install time. Only PySide6 and `python3-pip` are expected from the distro.
+For Linux, the preferred end-user paths are native packages: `.deb` for Debian/Ubuntu-style systems and `.rpm` for Fedora/openSUSE-style systems. These packages install bundled PyInstaller binaries, the launcher, native messaging host and udev rules. They do not require system Python modules or distro PySide6/Qt6 packages at runtime.
 
 For everything else, run the application directly from a cloned repo.
 
@@ -60,7 +60,7 @@ sudo apt install -y python3-venv libusb-1.0-0
 sudo apt install -y pcscd libpcsclite-dev
 ```
 
-The `.deb` package installs Python dependencies (fido2, pyusb, qtawesome, pyscard, hidapi, etc.) automatically via pip at install time. Only PySide6 must come from the distro — it is declared as a package dependency and pulled in by `apt`. If the system Python is upgraded, the postinst hook automatically reinstalls the pip-managed packages.
+The `.deb` and `.rpm` packages use the same PyInstaller payload model as the AppImage, but install it as regular system package files.
 
 For non-root HID access, install udev rules for SoloKeys devices:
 
@@ -102,7 +102,7 @@ To install the packaged RPM build on Fedora/openSUSE-style systems:
 sudo dnf install ./solokeys-gui-<version>-1.x86_64.rpm
 ```
 
-The RPM uses the same pip-based install model as the `.deb`: Python dependencies are installed automatically via pip at install time, with only PySide6 expected from the distro. If your RPM-based distro lacks a PySide6 package, use the source-based path above instead.
+The RPM uses the same bundled PyInstaller payload model as the `.deb`; it does not depend on the distro's Python or PySide6 packages at runtime.
 
 To build the Linux packages locally:
 

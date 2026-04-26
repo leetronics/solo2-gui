@@ -1,4 +1,7 @@
 #!/bin/sh
-export PYTHONPATH="@INSTALL_LIBDIR@/site-packages:@INSTALL_LIBDIR@${PYTHONPATH:+:$PYTHONPATH}"
 export SOLOKEYS_GUI_VERSION="@APP_VERSION@"
-exec /usr/bin/python3 -m solo_gui.main "$@"
+export GIO_USE_VFS=local
+export NO_AT_BRIDGE=1
+export QT_IM_MODULE=compose
+unset XMODIFIERS
+exec "@INSTALL_LIBDIR@/solokeys-gui-bin" "$@"

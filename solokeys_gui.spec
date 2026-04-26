@@ -278,7 +278,7 @@ elif sys.platform == "win32":
     )
 
 # ---------------------------------------------------------------------------
-# Linux — onedir (for completeness; primary method is source install)
+# Linux — onedir (used by AppImage and native .deb/.rpm payloads)
 # ---------------------------------------------------------------------------
 else:
     exe = EXE(

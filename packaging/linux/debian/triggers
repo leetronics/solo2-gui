@@ -1,5 +1,0 @@
-# Re-run pip install when the Python interpreter is upgraded so the bundled
-# C extension wheels (pyscard, hidapi, cryptography, cffi) are rebuilt for
-# the new Python ABI.  interest-noawait means we don't block the Python
-# package's own installation from completing.
-interest-noawait /usr/bin/python3
