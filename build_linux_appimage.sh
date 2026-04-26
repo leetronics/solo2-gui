@@ -155,6 +155,16 @@ sed \
 install -m 0644 "${APPDIR}/${APP_ID}.desktop" \
     "${APPDIR}/usr/share/applications/${APP_ID}.desktop"
 
+# Qt's IBus platform input context can be activated lazily on the first key
+# event and is fragile in AppImages because it bridges bundled Qt/GLib with the
+# host desktop's IBus stack. Use Qt's built-in compose input context instead.
+rm -f \
+    "${APPDIR}/usr/lib/${APP_ID}/_internal/PySide6/Qt/plugins/platforminputcontexts/libibusplatforminputcontextplugin.so"
+
+# libqxcb uses host libxkbcommon-x11/libxcb-xkb on most desktops. Bundling only
+# libxkbcommon.so.0 mixes the XKB stack and can segfault on the first key event.
+rm -f "${APPDIR}/usr/lib/${APP_ID}/_internal/libxkbcommon.so.0"
+
 cat > "${APPDIR}/AppRun" <<'EOF'
 #!/bin/sh
 set -eu
@@ -168,6 +178,11 @@ export SOLOKEYS_PATH="${SOLOKEYS_PATH:-auto}"
 export GIO_MODULE_DIR="${APPDIR}/usr/lib/gio/modules"
 export GIO_USE_VFS=local
 export NO_AT_BRIDGE=1
+
+# Avoid desktop input-method plugins that may crash when the first key event
+# crosses from bundled Qt libraries into host IBus/Fcitx services.
+export QT_IM_MODULE=compose
+unset XMODIFIERS
 
 if [ "${1:-}" = "--native-host" ]; then
     shift
