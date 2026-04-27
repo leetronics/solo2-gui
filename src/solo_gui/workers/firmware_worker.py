@@ -11,6 +11,7 @@ Solo2 firmware update process:
 
 from typing import Callable, Optional
 from dataclasses import dataclass
+import importlib.resources
 import os
 import time
 import hashlib
@@ -20,6 +21,8 @@ import requests
 
 from solo2.admin import AdminSession, RebootMode
 from solo2.bootloader import BootloaderSession, BootloaderError
+from solo2.provisioner import ProvisionerSession
+from solo2.errors import Solo2CommandError, Solo2TransportError
 
 
 def _is_sb2_file(data: bytes) -> bool:
@@ -366,6 +369,278 @@ class FirmwareUpdateWorker(QObject):
             success_message="Firmware flashed successfully!",
             completion_label="Done.",
         )
+
+    # ----------------------------------------------- attestation provisioning
+
+    def _load_bundled_provisioner(self) -> Optional[bytes]:
+        """Load the bundled provisioner firmware binary from package resources."""
+        # Try importlib.resources first (works in installed packages + PyInstaller)
+        try:
+            ref = importlib.resources.files("solo_gui") / "resources" / "provisioner-minimal.bin"
+            return ref.read_bytes()
+        except Exception:
+            pass
+
+        # Fallback: PyInstaller _MEIPASS
+        try:
+            import sys
+            base = getattr(sys, "_MEIPASS", None)
+            if base:
+                path = os.path.join(base, "resources", "provisioner-minimal.bin")
+                if os.path.isfile(path):
+                    with open(path, "rb") as f:
+                        return f.read()
+        except Exception:
+            pass
+
+        # Fallback: relative to this file (development)
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.join(here, "..", "resources", "provisioner-minimal.bin")
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    return f.read()
+        except Exception:
+            pass
+
+        return None
+
+    def _connect_provisioner(self, timeout: float = 20.0) -> ProvisionerSession:
+        """Wait for a provisioner applet to appear on PC/SC and connect.
+
+        The device needs time to boot after flashing the provisioner firmware.
+        We retry the PC/SC scan until the applet responds or we time out.
+        """
+        deadline = time.monotonic() + timeout
+        last_error = "Timeout waiting for provisioner"
+
+        while time.monotonic() < deadline:
+            try:
+                session = ProvisionerSession(device=None)
+                session._connect_pcsc()
+                return session
+            except (Solo2TransportError, Solo2CommandError) as exc:
+                last_error = str(exc)
+            except Exception as exc:
+                last_error = str(exc)
+            time.sleep(1.0)
+
+        raise Solo2TransportError(f"Provisioner not found: {last_error}")
+
+    def _reboot_to_bootloader_fresh(self) -> None:
+        """Discover the device anew and send admin reboot-to-bootloader.
+
+        After flashing provisioner firmware, the original self._device handle
+        is stale (different USB session). We re-discover via solo2.discovery.
+        """
+        from solo2.discovery import list_regular_descriptors, open_device
+
+        self.update_progress.emit(78, "Scanning for device after provisioning…")
+
+        deadline = time.monotonic() + 15.0
+        device = None
+        while time.monotonic() < deadline:
+            try:
+                descriptors = list_regular_descriptors()
+                if descriptors:
+                    device = open_device(descriptors[0])
+                    break
+            except Exception:
+                pass
+            time.sleep(1.0)
+
+        if device is None:
+            raise RuntimeError("Device not found after provisioning — is it still connected?")
+
+        self.update_progress.emit(80, "Sending reboot-to-bootloader command…")
+        try:
+            AdminSession(device).reboot(RebootMode.BOOTLOADER)
+            self.update_progress.emit(
+                82,
+                "Reboot command accepted — press the Solo 2 button now if it is blinking",
+            )
+        except Exception:
+            self.update_progress.emit(82, "Reboot command sent (no confirmation)")
+
+        time.sleep(2.0)
+
+    def flash_from_file_with_attestation(self, path: str) -> None:
+        """Flash firmware with FIDO2 self-attestation provisioning.
+
+        6-phase workflow:
+        1. Read & verify target firmware file
+        2. Generate attestation key material in memory
+        3. Flash bundled provisioner firmware
+        4. Wait & connect to provisioner via PC/SC
+        5. Provision key + cert via write_file
+        6. Flash the user's target firmware
+        """
+        from solo_gui.utils.attestation import generate_fido_attestation
+
+        self.update_started.emit()
+
+        try:
+            # --- Phase 1: Read and verify target firmware ---
+            self.update_progress.emit(2, "Phase 1/6: Reading target firmware…")
+            target_data = self._read_firmware_file(path)
+            if not target_data:
+                return
+            if not self.verify_firmware(target_data):
+                return
+
+            # --- Phase 2: Generate attestation key material ---
+            self.update_progress.emit(10, "Phase 2/6: Generating FIDO2 attestation key…")
+            try:
+                key_blob, cert_der = generate_fido_attestation()
+                self.update_progress.emit(
+                    12,
+                    f"Attestation key generated: key={len(key_blob)}B, cert={len(cert_der)}B",
+                )
+            except Exception as exc:
+                self.update_completed.emit(False, f"Key generation failed: {exc}")
+                return
+
+            # --- Phase 3: Flash provisioner firmware ---
+            self.update_progress.emit(15, "Phase 3/6: Loading provisioner firmware…")
+            provisioner_data = self._load_bundled_provisioner()
+            if not provisioner_data:
+                self.update_completed.emit(
+                    False,
+                    "Bundled provisioner firmware not found.\n"
+                    "The GUI installation may be incomplete.",
+                )
+                return
+
+            self.update_progress.emit(
+                18,
+                f"Provisioner firmware: {len(provisioner_data) // 1024} KB",
+            )
+
+            # Flash provisioner (reuses existing _flash_firmware_bytes)
+            try:
+                self._flash_firmware_bytes(provisioner_data)
+            except Exception as exc:
+                self.update_completed.emit(
+                    False, f"Failed to flash provisioner: {exc}"
+                )
+                return
+
+            # Wait for provisioner to boot
+            self.update_progress.emit(60, "Phase 4/6: Waiting for provisioner to boot…")
+            time.sleep(4.0)
+
+            # --- Phase 4: Connect to provisioner via PC/SC ---
+            provisioning_ok = False
+            try:
+                self.update_progress.emit(64, "Connecting to provisioner via PC/SC…")
+                prov = self._connect_provisioner(timeout=20.0)
+                self.update_progress.emit(68, "Provisioner connected!")
+
+                # --- Phase 5: Write key + cert ---
+                self.update_progress.emit(70, "Phase 5/6: Writing attestation key…")
+                prov.write_file("/fido/sec/00", key_blob)
+                self.update_progress.emit(73, "Attestation key written to /fido/sec/00")
+
+                # Reconnect (write_file closes the session)
+                prov = self._connect_provisioner(timeout=10.0)
+                self.update_progress.emit(74, "Writing attestation certificate…")
+                prov.write_file("/fido/x5c/00", cert_der)
+                self.update_progress.emit(76, "Attestation cert written to /fido/x5c/00")
+
+                provisioning_ok = True
+
+            except Exception as exc:
+                self.update_progress.emit(
+                    76,
+                    f"WARNING: Provisioning failed: {exc}\n"
+                    "Will still flash target firmware to avoid leaving provisioner on device.",
+                )
+
+            # --- Phase 6: Flash target firmware ---
+            self.update_progress.emit(78, "Phase 6/6: Preparing to flash target firmware…")
+            try:
+                self._reboot_to_bootloader_fresh()
+            except Exception as exc:
+                # If we can't discover the device, the user may need to manually
+                # enter bootloader mode (hold button while plugging in).
+                self.update_progress.emit(
+                    80,
+                    f"Could not auto-reboot: {exc}\n"
+                    "Trying to find bootloader directly…",
+                )
+
+            self.update_progress.emit(84, "Searching for bootloader…")
+            try:
+                self._flash_firmware_bytes_bootloader_only(target_data)
+            except Exception as exc:
+                msg = f"Failed to flash target firmware: {exc}"
+                if provisioning_ok:
+                    msg += "\nAttestation keys were provisioned successfully before this error."
+                self.update_completed.emit(False, msg)
+                return
+
+            # Reboot to regular mode
+            try:
+                self.reboot_to_regular()
+            except Exception:
+                pass
+
+            if provisioning_ok:
+                self.update_progress.emit(100, "Done — firmware flashed with attestation!")
+                self.update_completed.emit(
+                    True,
+                    "Firmware flashed with FIDO2 self-attestation!",
+                )
+            else:
+                self.update_progress.emit(100, "Done — firmware flashed (attestation failed)")
+                self.update_completed.emit(
+                    False,
+                    "Target firmware was flashed, but attestation provisioning failed.\n"
+                    "NFC FIDO2 may not work. You can retry the attestation provisioning.",
+                )
+
+        except BootloaderError as exc:
+            try:
+                self.reboot_to_regular()
+            except Exception:
+                pass
+            self.update_completed.emit(False, f"Bootloader error: {exc}")
+        except Exception as exc:
+            try:
+                self.reboot_to_regular()
+            except Exception:
+                pass
+            self.update_completed.emit(False, f"Attestation flash failed: {exc}")
+
+    def _flash_firmware_bytes_bootloader_only(self, firmware_data: bytes) -> None:
+        """Flash firmware via bootloader — assumes device is already in or entering bootloader.
+
+        Unlike _flash_firmware_bytes, this does NOT send the admin reboot command
+        (since the device may be running provisioner firmware, not the admin app).
+        """
+        use_sb2 = _is_sb2_file(firmware_data)
+
+        def _progress(written: int, total_bytes: int) -> None:
+            pct = 86 + int(written / total_bytes * 10)
+            self.update_progress.emit(
+                pct, f"Writing: {written // 1024}/{total_bytes // 1024} KB"
+            )
+
+        def _erase_progress(erased: int, total_bytes: int) -> None:
+            pct = 84 + int(erased / total_bytes * 2)
+            self.update_progress.emit(
+                pct, f"Erasing: {erased // 1024}/{total_bytes // 1024} KB"
+            )
+
+        with BootloaderSession.find(timeout=15) as bl:
+            self.update_progress.emit(85, "Bootloader connected — flashing target firmware")
+            if use_sb2:
+                bl.receive_sb_file(firmware_data, progress_cb=_progress)
+            else:
+                bl.write_flash(firmware_data, progress_cb=_progress, erase_progress_cb=_erase_progress)
+            self.update_progress.emit(96, "Write complete — sending reset…")
+            time.sleep(0.5)
+            bl.reset()
 
     def factory_reset(self, confirm: bool = False) -> None:
         """Perform factory reset of the device."""

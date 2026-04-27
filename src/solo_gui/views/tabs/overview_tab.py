@@ -4,7 +4,7 @@ from typing import Optional
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QGroupBox, QGridLayout, QPushButton,
+    QGroupBox, QGridLayout, QPushButton, QCheckBox,
     QProgressBar, QMessageBox, QLineEdit, QFileDialog, QPlainTextEdit
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
@@ -22,6 +22,7 @@ class OverviewTab(QWidget):
     _check_updates_requested = Signal(str)
     _perform_update_requested = Signal(object)
     _flash_from_file_requested = Signal(str)
+    _flash_with_attestation_requested = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -91,6 +92,15 @@ class OverviewTab(QWidget):
         browse_btn.clicked.connect(self._browse_firmware_file)
         file_row.addWidget(browse_btn)
         flash_layout.addLayout(file_row)
+        self._attest_checkbox = QCheckBox("Provision FIDO2 Self-Attestation")
+        self._attest_checkbox.setToolTip(
+            "Generate and install a FIDO2 attestation key + certificate before\n"
+            "flashing the selected firmware.\n\n"
+            "This temporarily flashes a provisioner firmware, writes the key\n"
+            "material via PC/SC, then flashes your selected firmware.\n"
+            "The process takes about 60 seconds."
+        )
+        flash_layout.addWidget(self._attest_checkbox)
         self._flash_file_btn = QPushButton("Flash File")
         self._flash_file_btn.clicked.connect(self._flash_from_file)
         flash_layout.addWidget(self._flash_file_btn)
@@ -174,6 +184,9 @@ class OverviewTab(QWidget):
         self._check_updates_requested.connect(self._firmware_worker.check_for_updates)
         self._perform_update_requested.connect(self._firmware_worker.perform_update)
         self._flash_from_file_requested.connect(self._firmware_worker.flash_from_file)
+        self._flash_with_attestation_requested.connect(
+            self._firmware_worker.flash_from_file_with_attestation
+        )
         self._firmware_thread.start()
 
     def _cleanup_firmware_worker(self) -> None:
@@ -275,13 +288,33 @@ class OverviewTab(QWidget):
         if not path:
             QMessageBox.warning(self, "No File", "Select a firmware .bin file first.")
             return
+
+        with_attestation = self._attest_checkbox.isChecked()
+
+        if with_attestation:
+            confirm_text = (
+                f"Flash firmware from:\n{path}\n\n"
+                "WITH FIDO2 self-attestation provisioning.\n\n"
+                "This is a 3-step process (~60 seconds):\n"
+                "1. Flash provisioner firmware (touch button when prompted)\n"
+                "2. Write attestation key + certificate via PC/SC\n"
+                "3. Flash your selected firmware (touch button again)\n\n"
+                "Step 2 requires a working PC/SC stack (pcscd on Linux,\n"
+                "CryptoTokenKit on macOS, or Winscard on Windows).\n"
+                "Do not disconnect the device during the process."
+            )
+        else:
+            confirm_text = (
+                f"Flash firmware from:\n{path}\n\n"
+                "After you click Yes, watch the Solo 2 and press its button when it "
+                "asks for touch confirmation to enter bootloader mode.\n\n"
+                "Do not disconnect during the process."
+            )
+
         reply = QMessageBox.warning(
             self,
             "Flash Firmware",
-            f"Flash firmware from:\n{path}\n\n"
-            "After you click Yes, watch the Solo 2 and press its button when it "
-            "asks for touch confirmation to enter bootloader mode.\n\n"
-            "Do not disconnect during the process.",
+            confirm_text,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -290,7 +323,10 @@ class OverviewTab(QWidget):
             self._show_touch_prompt()
             self._check_updates_button.setEnabled(False)
             self._flash_file_btn.setEnabled(False)
-            self._flash_from_file_requested.emit(path)
+            if with_attestation:
+                self._flash_with_attestation_requested.emit(path)
+            else:
+                self._flash_from_file_requested.emit(path)
 
     def _replace_last_log_line(self, message: str) -> None:
         """Overwrite the last line of the log (for in-place progress updates)."""

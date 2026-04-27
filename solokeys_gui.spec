@@ -92,6 +92,8 @@ datas = [
     (str(src_root / "solo_gui" / "resources" / "logo-light.png"), "resources"),
     (str(src_root / "solo_gui" / "resources" / "logo-dark.png"), "resources"),
     (str(src_root / "solo_gui" / "resources" / "logo-square.png"), "resources"),
+    # Provisioner firmware for FIDO2 attestation provisioning
+    (str(src_root / "solo_gui" / "resources" / "provisioner-minimal.bin"), "resources"),
 ]
 
 smartcard_hiddenimports = []
