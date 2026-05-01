@@ -94,6 +94,12 @@ datas = [
     (str(src_root / "solo_gui" / "resources" / "logo-square.png"), "resources"),
     # Provisioner firmware for FIDO2 attestation provisioning
     (str(src_root / "solo_gui" / "resources" / "provisioner-minimal.bin"), "resources"),
+    # License and privacy notices shipped with desktop artifacts
+    (str(project_root / "LICENSE"), "."),
+    (str(project_root / "LICENSE-MIT"), "."),
+    (str(project_root / "LICENSE-APACHE"), "."),
+    (str(project_root / "PRIVACY.md"), "."),
+    (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
 ]
 
 smartcard_hiddenimports = []

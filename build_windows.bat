@@ -13,6 +13,9 @@ for /f "tokens=*" %%v in ('python scripts\app_version.py resolved') do set APP_V
 set APP_DIR=dist\%APP_NAME%
 set HOST_EXE=dist\solokeys-secrets-host.exe
 set INSTALLER_OUTPUT=dist\installer\SoloKeys-GUI-Setup-%APP_VERSION%.exe
+set WINDOWS_CODESIGN_CONFIGURED=0
+if defined WINDOWS_CODESIGN_CERT_PATH set WINDOWS_CODESIGN_CONFIGURED=1
+if defined WINDOWS_CODESIGN_CERT_SHA1 set WINDOWS_CODESIGN_CONFIGURED=1
 
 echo.
 echo ============================================================
@@ -164,6 +167,9 @@ if not exist "%APP_DIR%" (
     exit /b 1
 )
 
+call :sign_file "%APP_DIR%\SoloKeys GUI.exe"
+if errorlevel 1 exit /b 1
+
 :: ---------------------------------------------------------------------------
 :: 6. Run PyInstaller for the native host helper
 :: ---------------------------------------------------------------------------
@@ -179,6 +185,9 @@ if not exist "%HOST_EXE%" (
     echo Error: PyInstaller did not produce %HOST_EXE%
     exit /b 1
 )
+
+call :sign_file "%HOST_EXE%"
+if errorlevel 1 exit /b 1
 
 copy /y "%HOST_EXE%" "%APP_DIR%\solokeys-secrets-host.exe" >nul
 if errorlevel 1 (
@@ -202,6 +211,9 @@ if not exist "%INSTALLER_OUTPUT%" (
     exit /b 1
 )
 
+call :sign_file "%INSTALLER_OUTPUT%"
+if errorlevel 1 exit /b 1
+
 :: ---------------------------------------------------------------------------
 :: 8. Summary
 :: ---------------------------------------------------------------------------
@@ -215,11 +227,40 @@ echo.
 echo  Intermediate app payload:
 echo    %APP_DIR%\
 echo.
-echo  Note: Windows SmartScreen may warn on first launch because
-echo  the installer and app are not code-signed. To suppress this warning,
-echo  sign the installer and bundled binaries before distribution.
+if "%WINDOWS_CODESIGN_CONFIGURED%"=="1" (
+    echo  Code signing:
+    echo    Enabled
+) else (
+    echo  Code signing:
+    echo    Disabled. Windows SmartScreen may warn on first launch.
+)
 echo ============================================================
 
 if exist src\solo_gui\_build_version.py del /q src\solo_gui\_build_version.py >nul 2>&1
 
 endlocal
+exit /b 0
+
+:sign_file
+set SIGN_TARGET=%~1
+if "%WINDOWS_CODESIGN_CONFIGURED%"=="0" (
+    echo Windows code signing not configured; skipping %SIGN_TARGET%.
+    exit /b 0
+)
+
+set POWERSHELL_CMD=
+for %%I in (pwsh.exe) do set POWERSHELL_CMD=%%~$PATH:I
+if not defined POWERSHELL_CMD (
+    for %%I in (powershell.exe) do set POWERSHELL_CMD=%%~$PATH:I
+)
+if not defined POWERSHELL_CMD (
+    echo Error: PowerShell not found; cannot sign %SIGN_TARGET%.
+    exit /b 1
+)
+
+"%POWERSHELL_CMD%" -NoProfile -ExecutionPolicy Bypass -File scripts\windows_sign.ps1 -Path "%SIGN_TARGET%"
+if errorlevel 1 (
+    echo Error: code signing failed for %SIGN_TARGET%.
+    exit /b 1
+)
+exit /b 0

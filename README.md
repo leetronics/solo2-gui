@@ -177,6 +177,17 @@ The primary distributable is produced as an installer in `dist\installer\`.
 
 The build also creates an intermediate PyInstaller app folder in `dist\SoloKeys GUI\`. That folder is packaged into the installer together with the native messaging host helper.
 
+The GitHub desktop artifact workflows can Authenticode-sign Windows builds when
+these repository secrets are configured:
+
+- `WINDOWS_CERTIFICATE_PFX`: base64-encoded standard code signing `.pfx`
+- `WINDOWS_CERTIFICATE_PASSWORD`: password for that `.pfx`
+
+When configured, the build signs the GUI executable, the native messaging host,
+and the final Inno Setup installer. Local builds can use the same path by setting
+`WINDOWS_CODESIGN_CERT_PATH` and `WINDOWS_CODESIGN_CERT_PASSWORD` before running
+`build_windows.bat`.
+
 ## Browser Integration
 
 The application can register a native messaging host named `com.solokeys.secrets` for Chrome/Chromium and Firefox. On startup it automatically ensures that both browser registrations exist, repairs stale per-user registrations, and leaves valid system-wide Linux package registrations unchanged. The same action is available in `Settings -> Browser`.
@@ -187,6 +198,12 @@ The native host supports two modes:
 
 - Forward requests to the running GUI over a local socket
 - Fall back to direct HID access when the GUI is not available
+
+## Privacy and Signing
+
+- Privacy policy: [`PRIVACY.md`](PRIVACY.md)
+- Third-party notices: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
+- SignPath readiness notes: [`docs/signpath-readiness.md`](docs/signpath-readiness.md)
 
 ## Development
 
@@ -219,4 +236,5 @@ test_*.py                Current pytest-based checks in the repo root
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0. See `LICENSE`.
+This project is licensed under either the Apache License 2.0 or the MIT license,
+at your option. See `LICENSE`, `LICENSE-APACHE`, and `LICENSE-MIT`.
