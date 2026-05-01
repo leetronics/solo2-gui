@@ -34,13 +34,25 @@ Known local metadata:
 - SHA-256: `51bbd12700cc1c0b577ca39749907c49130bba8bd2bf78d7e7e22d1d2efd41cf`
 - introduced in this repository by commit
   `1e1f26f76cc25e5674a3d8a50e4478c1ab3978ab`
+- source repository: `https://github.com/leetronics/solo2`
+- source revision: `20421d1a8a61e6e0043bd7f0e9c9f977803801f6`
+- source license: `MIT OR Apache-2.0`
+- build directory: `runners/lpc55`
+- build command:
+
+  ```bash
+  DEFMT_LOG=info cargo objcopy --release --no-default-features \
+      --features board-solo2,develop-provisioner,format-filesystem,admin-app \
+      -- -O binary /tmp/provisioner-minimal.bin
+  ```
 
 Before applying for third-party open-source code signing, verify and document:
 
-- the exact source repository and commit used to build this binary
-- the binary's license
-- the reproducible build command or release artifact that produced it
+- whether the exact binary can be reproduced byte-for-byte from the source
+  revision above
 - whether the binary should remain inside signed desktop installers
 
-Until that provenance is documented, this binary is the main open item for a
-strict "all bundled components are open source or system libraries" review.
+This documents the open-source provenance needed for a strict "all bundled
+components are open source or system libraries" review. Byte-for-byte
+reproducibility should still be verified before relying on this for third-party
+code-signing approval.
