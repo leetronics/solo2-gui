@@ -4,7 +4,7 @@ Name:           solokeys-gui
 Version:        @RPM_VERSION@
 Release:        @RPM_RELEASE@%{?dist}
 Summary:        Desktop GUI for managing Solo 2 devices
-License:        GPL-3.0-only
+License:        MIT OR Apache-2.0
 URL:            https://github.com/leetronics/solo2-gui
 BuildArch:      @RPM_ARCH@
 Source0:        @RPM_SOURCE_NAME@
@@ -16,7 +16,7 @@ Manage your Solo 2 device, FIDO2 resident credentials, Secrets/TOTP entries,
 firmware updates, admin features and browser integration from a desktop GUI.
 
 This package installs the Chrome/Chromium and Firefox native messaging hosts system-wide,
-adds a desktop launcher and ships udev rules for SoloKeys HID access.
+adds a desktop launcher and ships udev rules for Solo 2 USB/HID access.
 
 %prep
 mkdir -p %{_builddir}/payload
@@ -39,6 +39,7 @@ fi
 if command -v udevadm >/dev/null 2>&1; then
     udevadm control --reload-rules >/dev/null 2>&1 || true
     udevadm trigger --subsystem-match=hidraw >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=usb >/dev/null 2>&1 || true
 fi
 
 %postun

@@ -62,18 +62,27 @@ sudo apt install -y pcscd libpcsclite-dev
 
 The `.deb` and `.rpm` packages use the same PyInstaller payload model as the AppImage, but install it as regular system package files.
 
-For non-root HID access, install udev rules for SoloKeys devices:
+For non-root USB/HID access on systemd-logind desktops, install udev rules for
+Solo 2 regular firmware and bootloader modes:
 
 ```bash
-echo 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="beee", MODE="0660", GROUP="plugdev"' \
-    | sudo tee /etc/udev/rules.d/70-solokeys.rules
-echo 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b000", MODE="0660", GROUP="plugdev"' \
-    | sudo tee -a /etc/udev/rules.d/70-solokeys.rules
+sudo tee /etc/udev/rules.d/70-solokeys.rules >/dev/null <<'EOF'
+# Solo 2 regular firmware
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="beee", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="beee", TAG+="uaccess"
+
+# Solo 2 bootloader
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b000", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="b000", TAG+="uaccess"
+EOF
 sudo udevadm control --reload-rules
-sudo usermod -aG plugdev "$USER"
+sudo udevadm trigger --subsystem-match=hidraw
+sudo udevadm trigger --subsystem-match=usb
 ```
 
-Log out and back in after changing group membership.
+Unplug and replug the Solo 2 after installing or updating the rules. These rules
+use `TAG+="uaccess"` instead of a `plugdev` group because distributions such as
+openSUSE Tumbleweed do not create `plugdev` by default.
 
 To install and run the GUI directly from a checkout:
 
@@ -94,7 +103,7 @@ To install the packaged Debian/Ubuntu build:
 sudo apt install ./solokeys-gui_<version>_amd64.deb
 ```
 
-After installing the package, unplug and replug the SoloKey once so the fresh udev rules apply. Browser integration should already be registered system-wide for Chrome/Chromium and Firefox.
+After installing the package, unplug and replug the Solo 2 once so the fresh udev rules apply. Browser integration should already be registered system-wide for Chrome/Chromium and Firefox.
 
 To install the packaged RPM build on Fedora/openSUSE-style systems:
 

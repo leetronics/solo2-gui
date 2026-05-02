@@ -1,2 +1,8 @@
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="beee", MODE="0660", GROUP="plugdev", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b000", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+# Solo 2 regular firmware. hidraw is used by CTAP/FIDO2 HID access;
+# usb is used by libusb-based device discovery and low-level operations.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="beee", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="beee", TAG+="uaccess"
+
+# Solo 2 bootloader. Bootloader flashing uses the USB device node.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b000", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="b000", TAG+="uaccess"
