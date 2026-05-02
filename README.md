@@ -141,32 +141,8 @@ To build a distributable app bundle and DMG:
 
 Artifacts are written to `dist/`.
 
-By default this creates an ad-hoc signed local build. For a Developer ID signed
-release build, provide a signing identity and notarization credentials:
-
-```bash
-export MACOS_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-export MACOS_NOTARIZE=1
-export APPLE_NOTARY_KEY_PATH=/path/to/AuthKey_KEYID.p8
-export APPLE_NOTARY_KEY_ID=KEYID
-export APPLE_NOTARY_ISSUER_ID=ISSUER_UUID
-./build_macos.sh
-```
-
-Signed release builds automatically register the browser native messaging host
-from inside the signed `.app` bundle. Ad-hoc builds keep using a per-user copy
-under `~/Library/Application Support/solokeys-gui/` to avoid local Gatekeeper
-issues while developing.
-
-The GitHub desktop artifact workflows can sign and notarize macOS builds when
-these repository secrets are configured:
-
-- `APPLE_CERTIFICATE_P12`: base64-encoded Developer ID Application `.p12`
-- `APPLE_CERTIFICATE_PASSWORD`: password for that `.p12`
-- `APPLE_DEVELOPER_ID_APPLICATION`: full codesign identity string
-- `APPLE_NOTARY_KEY_BASE64`: base64-encoded App Store Connect API `.p8` key
-- `APPLE_NOTARY_KEY_ID`: App Store Connect API key ID
-- `APPLE_NOTARY_ISSUER_ID`: App Store Connect issuer UUID
+macOS signing and notarization details are documented in
+[`CODE-SIGNING.md`](CODE-SIGNING.md).
 
 ### Windows
 
@@ -186,16 +162,8 @@ The primary distributable is produced as an installer in `dist\installer\`.
 
 The build also creates an intermediate PyInstaller app folder in `dist\SoloKeys GUI\`. That folder is packaged into the installer together with the native messaging host helper.
 
-The GitHub desktop artifact workflows can Authenticode-sign Windows builds when
-these repository secrets are configured:
-
-- `WINDOWS_CERTIFICATE_PFX`: base64-encoded standard code signing `.pfx`
-- `WINDOWS_CERTIFICATE_PASSWORD`: password for that `.pfx`
-
-When configured, the build signs the GUI executable, the native messaging host,
-and the final Inno Setup installer. Local builds can use the same path by setting
-`WINDOWS_CODESIGN_CERT_PATH` and `WINDOWS_CODESIGN_CERT_PASSWORD` before running
-`build_windows.bat`.
+Windows Authenticode and SignPath details are documented in
+[`CODE-SIGNING.md`](CODE-SIGNING.md).
 
 ## Browser Integration
 
@@ -212,7 +180,7 @@ The native host supports two modes:
 
 - Privacy policy: [`PRIVACY.md`](PRIVACY.md)
 - Third-party notices: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
-- SignPath readiness notes: [`docs/signpath-readiness.md`](docs/signpath-readiness.md)
+- Code signing: [`CODE-SIGNING.md`](CODE-SIGNING.md)
 
 ## Development
 
