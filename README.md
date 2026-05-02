@@ -13,6 +13,44 @@ Desktop GUI for managing Solo 2 devices across Linux, macOS, and Windows.
 - Registers Chrome/Chromium and Firefox native messaging hosts for browser-based Vault integration
 - Optional autostart on login
 
+## Installation
+
+Download the latest desktop artifact for your platform from
+[GitHub Releases](https://github.com/leetronics/solo2-gui/releases).
+
+### Windows
+
+Download and run `SoloKeys-GUI-Setup-<version>.exe`.
+
+The installer includes the desktop application and the native messaging host for
+browser integration.
+
+### macOS
+
+Download `SoloKeys-GUI-<version>.dmg`, open it, and drag `SoloKeys GUI.app` into
+`Applications`.
+
+### Linux
+
+Use the native package when possible:
+
+- Debian/Ubuntu: install `solokeys-gui_<version>_amd64.deb`
+- Fedora/openSUSE-style systems: install `solokeys-gui-<version>-1.x86_64.rpm`
+
+The `.deb` and `.rpm` packages install the desktop launcher, native messaging
+host registrations, and Solo 2 udev rules system-wide.
+
+Alternatively, download `SoloKeys-GUI-<version>-x86_64.AppImage`, make it
+executable, and run it directly:
+
+```bash
+chmod +x SoloKeys-GUI-<version>-x86_64.AppImage
+./SoloKeys-GUI-<version>-x86_64.AppImage
+```
+
+The AppImage does not install udev rules. Install the Linux udev rules from the
+[Linux platform notes](#linux) manually, then unplug and replug the Solo 2.
+
 ## Requirements
 
 - Python 3.10 or newer
