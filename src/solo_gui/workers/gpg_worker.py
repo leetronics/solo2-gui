@@ -258,6 +258,38 @@ def _missing_gnupg_tool_message(tool: str) -> str:
     )
 
 
+_GNUPG_TOOLS = frozenset({"gpg", "gpg-card", "gpgconf"})
+
+
+def resolve_gnupg_tool(tool: str) -> Optional[str]:
+    """Resolve a GnuPG executable, including GUI-safe macOS locations.
+
+    Applications launched from Finder do not inherit the shell PATH, so a
+    Homebrew or GPG Suite installation can be invisible to ``shutil.which``.
+    """
+    path = shutil.which(tool)
+    if path:
+        return path
+
+    if platform.system() != "Darwin" or tool not in _GNUPG_TOOLS:
+        return None
+
+    for directory in (
+        "/opt/homebrew/bin",  # Homebrew on Apple Silicon
+        "/usr/local/bin",  # Homebrew on Intel
+        "/usr/local/MacGPG2/bin",  # GPG Suite
+        "/opt/local/bin",  # MacPorts
+    ):
+        candidate = os.path.join(directory, tool)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def gnupg_import_tools_available() -> bool:
+    return all(resolve_gnupg_tool(tool) for tool in _GNUPG_TOOLS)
+
+
 def _normalize_algo_alias(name: str) -> str:
     normalized = name.strip().lower().split(":", 1)[0]
     normalized = normalized.split("(", 1)[0].strip()
@@ -612,7 +644,7 @@ class GpgWorker(QObject):
         return f"SW={sw1:02X}{sw2:02X}"
 
     def _ensure_gpg_tool(self, tool: str) -> str:
-        path = shutil.which(tool)
+        path = resolve_gnupg_tool(tool)
         if not path:
             raise RuntimeError(_missing_gnupg_tool_message(tool))
         return path
@@ -626,6 +658,9 @@ class GpgWorker(QObject):
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["GNUPGHOME"] = gnupghome
+        executable = resolve_gnupg_tool(args[0])
+        if executable:
+            args = [executable, *args[1:]]
         result = subprocess.run(
             args,
             input=input_text,
@@ -640,7 +675,7 @@ class GpgWorker(QObject):
         return result
 
     def _kill_temp_agent(self, gnupghome: str) -> None:
-        gpgconf = shutil.which("gpgconf")
+        gpgconf = resolve_gnupg_tool("gpgconf")
         if not gpgconf:
             return
         env = os.environ.copy()

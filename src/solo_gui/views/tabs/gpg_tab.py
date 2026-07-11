@@ -2,7 +2,6 @@
 
 import os
 import platform
-import shutil
 from typing import Optional, Dict
 
 from PySide6.QtWidgets import (
@@ -35,6 +34,7 @@ from solo_gui.workers.gpg_worker import (
     GpgKeyInfo,
     GpgKeySlot,
     PCSC_AVAILABLE,
+    gnupg_import_tools_available,
     normalize_openpgp_algorithm_label,
     openpgp_candidate_matches_slot,
     supported_openpgp_algorithm_labels,
@@ -191,7 +191,7 @@ def _missing_gnupg_help_text() -> str:
 
 
 def _gnupg_import_tools_available() -> bool:
-    return all(shutil.which(tool) for tool in ("gpg", "gpg-card", "gpgconf"))
+    return gnupg_import_tools_available()
 
 
 _SLOT_META = {
