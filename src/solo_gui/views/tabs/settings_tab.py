@@ -41,9 +41,9 @@ class SettingsTab(QWidget):
 
         self._settings_tabs = QTabWidget()
 
-        self._settings_tabs.addTab(self._create_diagnostics_tab(), "Diagnostics")
         self._settings_tabs.addTab(self._create_app_settings_tab(), "Application")
         self._settings_tabs.addTab(self._create_browser_tab(), "Browser")
+        self._settings_tabs.addTab(self._create_diagnostics_tab(), "Diagnostics")
 
         layout.addWidget(self._settings_tabs)
 
