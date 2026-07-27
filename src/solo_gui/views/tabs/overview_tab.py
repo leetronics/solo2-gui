@@ -319,14 +319,24 @@ class OverviewTab(QWidget):
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            self._set_busy(True, "Flashing firmware…")
-            self._show_touch_prompt()
-            self._check_updates_button.setEnabled(False)
-            self._flash_file_btn.setEnabled(False)
-            if with_attestation:
-                self._flash_with_attestation_requested.emit(path)
-            else:
-                self._flash_from_file_requested.emit(path)
+            self._start_flash(path, with_attestation)
+
+    def _start_flash(self, path: str, with_attestation: bool) -> None:
+        self._set_busy(True, "Flashing firmware…")
+        self._show_touch_prompt()
+        self._check_updates_button.setEnabled(False)
+        self._flash_file_btn.setEnabled(False)
+        if with_attestation:
+            self._flash_with_attestation_requested.emit(path)
+        else:
+            self._flash_from_file_requested.emit(path)
+
+    def start_flash_from_file(self, path: str) -> None:
+        """Start flashing a firmware file — entry point for the Admin tab's
+        Danger Zone (already confirmed there, so no extra dialog here)."""
+        if not self._device or not self._firmware_worker or self._firmware_busy:
+            return
+        self._start_flash(path, with_attestation=False)
 
     def _replace_last_log_line(self, message: str) -> None:
         """Overwrite the last line of the log (for in-place progress updates)."""

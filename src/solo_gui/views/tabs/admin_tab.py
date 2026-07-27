@@ -82,6 +82,7 @@ class AdminTab(QWidget):
 
     reconnect_expected = Signal()
     reconnect_prepare = Signal()  # prepare monitor + pause polling (ISP check starting)
+    flash_sb2_requested = Signal(str)  # path to .sb2 — handled by overview tab
     isp_done = Signal()           # ISP check finished — resume monitor polling
     variant_detected = Signal(str)  # forwarded to overview tab
     _check_variant_requested = Signal()
@@ -193,13 +194,7 @@ class AdminTab(QWidget):
         self._factory_reset_hint_label.setVisible(False)
         danger_layout.addWidget(self._factory_reset_hint_label)
 
-        danger_btn_layout = QHBoxLayout()
-        self._factory_reset_btn = QPushButton("Factory Reset")
-        self._factory_reset_btn.setToolTip(
-            "Unplug and re-plug the device, start reset within about 10 seconds, then touch to confirm."
-        )
-        self._factory_reset_btn.clicked.connect(self._factory_reset)
-        self._factory_reset_btn.setStyleSheet(f"""
+        danger_btn_style = f"""
             QPushButton {{
                 color: {danger_colors['title_text']};
                 border: 1px solid {danger_colors['border']};
@@ -215,8 +210,24 @@ class AdminTab(QWidget):
                 border-color: {danger_colors['button_disabled_border']};
                 color: {danger_colors['button_disabled_text']};
             }}
-        """)
+        """
+        danger_btn_layout = QHBoxLayout()
+        self._factory_reset_btn = QPushButton("Factory Reset")
+        self._factory_reset_btn.setToolTip(
+            "Unplug and re-plug the device, start reset within about 10 seconds, then touch to confirm."
+        )
+        self._factory_reset_btn.clicked.connect(self._factory_reset)
+        self._factory_reset_btn.setStyleSheet(danger_btn_style)
         danger_btn_layout.addWidget(self._factory_reset_btn)
+        self._flash_sb2_btn = QPushButton("Flash Signed Firmware (.sb2)…")
+        self._flash_sb2_btn.setToolTip(
+            "Flash a signed SB2.1 firmware file (.sb2) from disk.\n"
+            "Works on all variants, including Secure devices — the bootloader\n"
+            "rejects files that are not correctly signed."
+        )
+        self._flash_sb2_btn.clicked.connect(self._flash_sb2_from_file)
+        self._flash_sb2_btn.setStyleSheet(danger_btn_style)
+        danger_btn_layout.addWidget(self._flash_sb2_btn)
         self._restart_admin_button = QPushButton("Restart as Administrator")
         self._restart_admin_button.clicked.connect(partial(restart_as_admin_from_ui, self))
         self._restart_admin_button.setVisible(False)
@@ -315,6 +326,7 @@ class AdminTab(QWidget):
         self._unlock_btn.setEnabled(enabled and self._last_isp_variant == "Hacker (locked)")
         self._reboot_regular_btn.setEnabled(enabled)
         self._reboot_bootloader_btn.setEnabled(enabled)
+        self._flash_sb2_btn.setEnabled(enabled)
         self._update_factory_reset_controls(enabled)
 
     def _apply_capabilities(self, caps) -> None:
@@ -324,6 +336,7 @@ class AdminTab(QWidget):
         self._unlock_btn.setEnabled(can_boot and self._last_isp_variant == "Hacker (locked)")
         self._reboot_regular_btn.setEnabled(has_device and caps.has_reboot)
         self._reboot_bootloader_btn.setEnabled(can_boot)
+        self._flash_sb2_btn.setEnabled(can_boot)
         self._update_factory_reset_controls(has_device)
 
     def _apply_factory_reset_hint_style(self) -> None:
@@ -445,6 +458,32 @@ class AdminTab(QWidget):
         self.reconnect_prepare.emit()
         self._show_touch_prompt()
         self._unlock_requested.emit("")
+
+    def _flash_sb2_from_file(self) -> None:
+        reply = QMessageBox.warning(
+            self,
+            "Flash Signed Firmware",
+            "This flashes a signed SB2.1 firmware file (.sb2), like the ones "
+            "attached to official GitHub releases.\n\n"
+            "Signed firmware can be installed on any variant, including Secure "
+            "devices — the bootloader rejects files that are not correctly signed.\n\n"
+            "After you select a file, watch the Solo 2 and press its button when "
+            "it asks for touch confirmation to enter bootloader mode.\n\n"
+            "Do not disconnect the device during the process.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Signed Firmware", "", "Signed Firmware (*.sb2);;All Files (*)"
+        )
+        if not path:
+            return
+
+        self.flash_sb2_requested.emit(path)
 
     def _reboot(self, mode: RebootMode) -> None:
         mode_name = "bootloader" if mode == RebootMode.BOOTLOADER else "normal"
