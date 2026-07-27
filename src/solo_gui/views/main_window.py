@@ -505,6 +505,7 @@ class MainWindow(QMainWindow):
         self._admin_tab.reconnect_prepare.connect(self._prepare_for_reconnect)
         self._admin_tab.isp_done.connect(self._device_monitor.resume_monitoring)
         self._admin_tab.variant_detected.connect(self._overview_tab.on_variant_detected)
+        self._admin_tab.flash_sb2_requested.connect(self._on_flash_sb2_requested)
         self._overview_tab.check_variant_requested.connect(self._admin_tab.trigger_check_variant)
         self._piv_tab.piv_availability.connect(self._on_piv_availability)
         self._gpg_tab.gpg_availability.connect(self._on_gpg_availability)
@@ -632,6 +633,11 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage(f"Solo 2 connected ({mode_label} mode)")
         except Exception:
             self._status_bar.showMessage("Ready")
+
+    def _on_flash_sb2_requested(self, path: str) -> None:
+        """Danger Zone .sb2 flash — runs on the overview tab's flash machinery."""
+        self._select_tab(self._overview_tab)
+        self._overview_tab.start_flash_from_file(path)
 
     def _prepare_for_reconnect(self) -> None:
         """Tell the device monitor to expect a disconnect, without clearing worker state.
