@@ -26,8 +26,8 @@ from solo2.errors import Solo2CommandError, Solo2TransportError
 
 
 def _is_sb2_file(data: bytes) -> bool:
-    """Detect SB2.1 by the 'sgtl' magic at bytes 28-32."""
-    return len(data) >= 96 and data[28:32] == b"sgtl"
+    """Detect SB2.1 by the header magics: 'STMP' at offset 20, 'sgtl' at offset 52."""
+    return len(data) >= 96 and data[20:24] == b"STMP" and data[52:56] == b"sgtl"
 
 
 @dataclass
