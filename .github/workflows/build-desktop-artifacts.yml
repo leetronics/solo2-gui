@@ -62,7 +62,8 @@ jobs:
               core.info(`Deleting existing tag ref ${ref}.`);
               await github.rest.git.deleteRef({ owner, repo, ref });
             } catch (error) {
-              if (error.status !== 404) {
+              // deleteRef answers 422 "Reference does not exist" for missing refs.
+              if (error.status !== 404 && error.status !== 422) {
                 throw error;
               }
               core.info(`Tag ref ${ref} does not exist yet.`);
