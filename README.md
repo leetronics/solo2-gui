@@ -16,7 +16,7 @@ Desktop GUI for managing Solo 2 devices across Linux, macOS, and Windows.
 ## Installation
 
 Download the latest desktop artifact for your platform from
-[GitHub Releases](https://github.com/leetronics/solo2-gui/releases).
+[GitHub Releases](https://github.com/solokeys/solo2-python-gui/releases).
 
 ### Windows
 
@@ -62,8 +62,8 @@ The AppImage does not install udev rules. Install the Linux udev rules from the
 ## Running From Source
 
 ```bash
-git clone git@github.com:leetronics/solo2-gui.git
-cd solo2-gui
+git clone git@github.com:solokeys/solo2-python-gui.git
+cd solo2-python-gui
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -125,8 +125,8 @@ openSUSE Tumbleweed do not create `plugdev` by default.
 To install and run the GUI directly from a checkout:
 
 ```bash
-git clone git@github.com:leetronics/solo2-gui.git
-cd solo2-gui
+git clone git@github.com:solokeys/solo2-python-gui.git
+cd solo2-python-gui
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -213,6 +213,19 @@ The native host supports two modes:
 
 - Forward requests to the running GUI over a local socket
 - Fall back to direct HID access when the GUI is not available
+
+## Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate
+by the [SignPath Foundation](https://signpath.org/).
+
+- Project maintainer: Manuel Domke ([@manuel-domke](https://github.com/manuel-domke)) —
+  acts as author, as reviewer for external contributions, and as release approver.
+- Windows release artifacts are built by the public GitHub Actions release workflow;
+  build and signing details are documented in [`CODE-SIGNING.md`](CODE-SIGNING.md).
+- This program does not transfer any information to other networked systems apart from
+  user-initiated update checks and firmware downloads — see the
+  [privacy policy](PRIVACY.md).
 
 ## Privacy and Signing
 

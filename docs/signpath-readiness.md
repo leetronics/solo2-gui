@@ -15,12 +15,12 @@ References:
 
 | Item | Status |
 |------|--------|
-| Source repository | `https://github.com/leetronics/solo2-gui` |
+| Source repository | `https://github.com/solokeys/solo2-python-gui` |
 | License | `MIT OR Apache-2.0` |
 | License files | `LICENSE`, `LICENSE-MIT`, `LICENSE-APACHE` |
 | Privacy policy | `PRIVACY.md` |
 | Third-party notices | `THIRD_PARTY_NOTICES.md` |
-| Release artifacts | GitHub Releases |
+| Release artifacts | GitHub Releases (`https://github.com/solokeys/solo2-python-gui/releases`) |
 | Windows artifact | Inno Setup installer `SoloKeys-GUI-Setup-<version>.exe` |
 | Native host artifact | Bundled `solokeys-secrets-host.exe` |
 
@@ -47,8 +47,17 @@ using repository-stored certificate material.
   `DEFMT_LOG=info cargo objcopy --release --no-default-features --features board-solo2,develop-provisioner,format-filesystem,admin-app -- -O binary /tmp/provisioner-minimal.bin`.
 - Confirm that all bundled PyInstaller runtime contents are covered by
   open-source licenses or system-library exceptions.
-- Add a release/download page section explaining that Windows artifacts are
-  signed through SignPath Foundation once this is active.
+- ~~Add a release/download page section explaining that Windows artifacts are
+  signed through SignPath Foundation once this is active.~~ Done — the README
+  now contains a "Code Signing Policy" section with the required wording,
+  maintainer roles, and privacy policy link.
+- Publish a first versioned release (tag `v<version>`) on
+  `https://github.com/solokeys/solo2-python-gui` — SignPath requires the project
+  to already be released in the form that should be signed; only the `ci-latest`
+  pre-release exists so far.
+- The signing workflow must run in `solokeys/solo2-python-gui`: SignPath
+  verifies the repository URL from the request form against the CI origin for
+  every build.
 - Decide whether SignPath should sign only the final installer or also nested
   executables through an artifact configuration. Signing both nested executables
   and the final installer is preferable.

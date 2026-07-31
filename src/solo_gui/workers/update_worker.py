@@ -2,7 +2,7 @@
 
 from solo_gui import __version__ as APP_VERSION
 
-GITHUB_REPO = "leetronics/solo2-gui"
+GITHUB_REPO = "solokeys/solo2-python-gui"
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 

@@ -5,7 +5,7 @@ Version:        @RPM_VERSION@
 Release:        @RPM_RELEASE@%{?dist}
 Summary:        Desktop GUI for managing Solo 2 devices
 License:        MIT OR Apache-2.0
-URL:            https://github.com/leetronics/solo2-gui
+URL:            https://github.com/solokeys/solo2-python-gui
 BuildArch:      @RPM_ARCH@
 Source0:        @RPM_SOURCE_NAME@
 Requires:       libusb1

@@ -727,8 +727,8 @@ class MainWindow(QMainWindow):
             "About SoloKeys GUI",
             f"SoloKeys GUI v{__version__}\n\n"
             "Platform-independent GUI for managing SoloKeys Solo 2 FIDO2 tokens.\n\n"
-            "License: GNU GPL v3.0\n"
-            "Source: https://github.com/leetronics/solo2-gui",
+            "License: MIT OR Apache-2.0\n"
+            "Source: https://github.com/solokeys/solo2-python-gui",
         )
 
     def _check_for_updates(self) -> None:
