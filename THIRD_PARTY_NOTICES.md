@@ -46,13 +46,23 @@ Known local metadata:
       -- -O binary /tmp/provisioner-minimal.bin
   ```
 
-Before applying for third-party open-source code signing, verify and document:
+Reproducibility verification (2026-07-31):
 
-- whether the exact binary can be reproduced byte-for-byte from the source
-  revision above
+- rebuilt from a fresh clone of the source revision above, using the build
+  command above with the repository-pinned Rust toolchain 1.94
+  (`rust-toolchain.toml`), `cargo-binutils` (`cargo objcopy`), `flip-link`,
+  and `arm-none-eabi-gcc` 14.2.rel1
+- result: identical size (227324 bytes); 227319 of 227324 bytes identical
+- the only difference is 5 bytes at offsets 220662-220666 (1-based): the
+  builder's username inside an embedded
+  `/home/<user>/.cargo/registry/src/index.crates.io-.../` path string
+  (`manuel` in the bundled binary). A fully deterministic rebuild would
+  require `--remap-path-prefix`; apart from this embedded build path, the
+  binary is byte-for-byte reproducible from the documented source revision.
+
+Still to decide before applying for third-party open-source code signing:
+
 - whether the binary should remain inside signed desktop installers
 
 This documents the open-source provenance needed for a strict "all bundled
-components are open source or system libraries" review. Byte-for-byte
-reproducibility should still be verified before relying on this for third-party
-code-signing approval.
+components are open source or system libraries" review.

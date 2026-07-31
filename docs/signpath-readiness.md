@@ -39,12 +39,12 @@ using repository-stored certificate material.
 
 ## Open Items Before Applying
 
-- Verify byte-for-byte reproducibility of
-  `src/solo_gui/resources/provisioner-minimal.bin`.
-  Current provenance is documented in `THIRD_PARTY_NOTICES.md`: it is based on
-  `https://github.com/leetronics/solo2` commit
-  `20421d1a8a61e6e0043bd7f0e9c9f977803801f6`, built from `runners/lpc55` with
-  `DEFMT_LOG=info cargo objcopy --release --no-default-features --features board-solo2,develop-provisioner,format-filesystem,admin-app -- -O binary /tmp/provisioner-minimal.bin`.
+- ~~Verify byte-for-byte reproducibility of
+  `src/solo_gui/resources/provisioner-minimal.bin`.~~ Done (2026-07-31) — rebuilt
+  from `https://github.com/leetronics/solo2` commit
+  `20421d1a8a61e6e0043bd7f0e9c9f977803801f6` per the documented command; identical
+  except for 5 bytes of the builder's home directory embedded in a cargo registry
+  path string. Details recorded in `THIRD_PARTY_NOTICES.md`.
 - Confirm that all bundled PyInstaller runtime contents are covered by
   open-source licenses or system-library exceptions.
 - ~~Add a release/download page section explaining that Windows artifacts are
