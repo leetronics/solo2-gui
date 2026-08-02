@@ -60,9 +60,12 @@ Reproducibility verification (2026-07-31):
   require `--remap-path-prefix`; apart from this embedded build path, the
   binary is byte-for-byte reproducible from the documented source revision.
 
-Still to decide before applying for third-party open-source code signing:
-
-- whether the binary should remain inside signed desktop installers
+Decision (2026-08-02): the binary remains inside signed desktop installers.
+It is open-source firmware with documented, verified provenance (see above),
+required for the FIDO2 attestation provisioning feature, and shipping it keeps
+that feature working offline. It is data to the desktop application — device
+firmware, never executed on the host — so it is not itself Authenticode-signed;
+its integrity is covered by the signed installer.
 
 This documents the open-source provenance needed for a strict "all bundled
 components are open source or system libraries" review.
