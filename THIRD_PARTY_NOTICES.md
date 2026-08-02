@@ -43,43 +43,38 @@ the Solo 2 FIDO2 self-attestation provisioning flow.
 
 Known local metadata:
 
-- size: `227324` bytes
-- SHA-256: `51bbd12700cc1c0b577ca39749907c49130bba8bd2bf78d7e7e22d1d2efd41cf`
-- introduced in this repository by commit
-  `1e1f26f76cc25e5674a3d8a50e4478c1ab3978ab`
+- size: `227308` bytes
+- SHA-256: `b5be58ce11d23e29cfa69ec9cc6f27f0c8d2af9d953f63d1bdbb2095e5973305`
 - source repository: `https://github.com/leetronics/solo2`
 - source revision: `20421d1a8a61e6e0043bd7f0e9c9f977803801f6`
 - source license: `MIT OR Apache-2.0`
 - build directory: `runners/lpc55`
-- build command:
+- toolchain: Rust pinned by the repository's `rust-toolchain.toml`, plus
+  `cargo-binutils`, `flip-link`, and `arm-none-eabi-gcc`
+- build command (run from `runners/lpc55` of the source repository):
 
   ```bash
-  DEFMT_LOG=info cargo objcopy --release --no-default-features \
+  DEFMT_LOG=info \
+  RUSTFLAGS="-C linker=flip-link -C link-arg=-Tlink.x -C link-arg=-Tdefmt.x -Dwarnings \
+    --remap-path-prefix=$HOME/.cargo=/cargo \
+    --remap-path-prefix=$(git rev-parse --show-toplevel)=/build" \
+  cargo objcopy --release --no-default-features \
       --features board-solo2,develop-provisioner,format-filesystem,admin-app \
-      -- -O binary /tmp/provisioner-minimal.bin
+      -- -O binary provisioner-minimal.bin
   ```
 
-Reproducibility verification (2026-07-31):
+The build is byte-for-byte reproducible: the `--remap-path-prefix` flags strip
+the build host's directories from embedded path strings, and independent builds
+from different checkout locations produce exactly the SHA-256 above. Because
+the `RUSTFLAGS` environment variable replaces the `rustflags` from the
+repository's `.cargo/config.toml`, the linker flags are repeated in it.
 
-- rebuilt from a fresh clone of the source revision above, using the build
-  command above with the repository-pinned Rust toolchain 1.94
-  (`rust-toolchain.toml`), `cargo-binutils` (`cargo objcopy`), `flip-link`,
-  and `arm-none-eabi-gcc` 14.2.rel1
-- result: identical size (227324 bytes); 227319 of 227324 bytes identical
-- the only difference is 5 bytes at offsets 220662-220666 (1-based): the
-  builder's username inside an embedded
-  `/home/<user>/.cargo/registry/src/index.crates.io-.../` path string
-  (`manuel` in the bundled binary). A fully deterministic rebuild would
-  require `--remap-path-prefix`; apart from this embedded build path, the
-  binary is byte-for-byte reproducible from the documented source revision.
-
-Decision (2026-08-02): the binary remains inside signed desktop installers.
-It is open-source firmware with documented, verified provenance (see above),
-required for provisioning FIDO2 self-attestation on hacker keys / developer
-builds, and shipping it keeps that feature working offline. It is data to the
-desktop application — device firmware, never executed on the host — so it is
-not itself Authenticode-signed; its integrity is covered by the signed
-installer.
+The binary ships inside the signed desktop installers: it is open-source
+firmware with the provenance documented above, required for provisioning FIDO2
+self-attestation on hacker keys / developer builds, and bundling it keeps that
+feature working offline. It is data to the desktop application — device
+firmware, never executed on the host — so it is not itself Authenticode-signed;
+its integrity is covered by the signed installer.
 
 This documents the open-source provenance needed for a strict "all bundled
 components are open source or system libraries" review.

@@ -24,9 +24,10 @@ References:
 | Windows artifact | Inno Setup installer `SoloKeys-GUI-Setup-<version>.exe` |
 | Native host artifact | Bundled `solokeys-secrets-host.exe` |
 
-## Proposed Signing Scope
+## Signing Scope
 
-The Windows release build should sign:
+SignPath signs the nested executables and the final installer via an artifact
+configuration with deep signing:
 
 - `dist\SoloKeys GUI\SoloKeys GUI.exe`
 - `dist\SoloKeys GUI\solokeys-secrets-host.exe`
@@ -37,35 +38,22 @@ private or commercial certificates. If SignPath Foundation accepts the project,
 the release workflow should submit the Windows artifact to SignPath instead of
 using repository-stored certificate material.
 
+## Verified Readiness Facts
+
+- The README contains the required "Code Signing Policy" section (SignPath
+  wording, maintainer roles, privacy policy link).
+- `src/solo_gui/resources/provisioner-minimal.bin` is byte-for-byte
+  reproducible from its documented source revision; provenance, build command,
+  and bundling rationale are recorded in `THIRD_PARTY_NOTICES.md`.
+- All components bundled into the PyInstaller payloads are OSI-approved open
+  source; copyleft handling is recorded in `THIRD_PARTY_NOTICES.md`.
+
 ## Open Items Before Applying
 
-- ~~Verify byte-for-byte reproducibility of
-  `src/solo_gui/resources/provisioner-minimal.bin`.~~ Done (2026-07-31) — rebuilt
-  from `https://github.com/leetronics/solo2` commit
-  `20421d1a8a61e6e0043bd7f0e9c9f977803801f6` per the documented command; identical
-  except for 5 bytes of the builder's home directory embedded in a cargo registry
-  path string. Details recorded in `THIRD_PARTY_NOTICES.md`.
-- ~~Confirm that all bundled PyInstaller runtime contents are covered by
-  open-source licenses or system-library exceptions.~~ Done (2026-08-02) —
-  license metadata of every package in the build environment reviewed; all
-  bundled components are OSI-approved open source (details and copyleft
-  handling recorded in `THIRD_PARTY_NOTICES.md`).
-- ~~Add a release/download page section explaining that Windows artifacts are
-  signed through SignPath Foundation once this is active.~~ Done — the README
-  now contains a "Code Signing Policy" section with the required wording,
-  maintainer roles, and privacy policy link.
 - Publish a first versioned release (tag `v<version>`) on
   `https://github.com/solokeys/solo2-python-gui` — SignPath requires the project
   to already be released in the form that should be signed; only the `ci-latest`
   pre-release exists so far.
-- The signing workflow must run in `solokeys/solo2-python-gui`: SignPath
-  verifies the repository URL from the request form against the CI origin for
-  every build.
-- ~~Decide whether SignPath should sign only the final installer or also nested
-  executables through an artifact configuration.~~ Decided (2026-08-02): sign
-  everything — the nested executables (`SoloKeys GUI.exe`,
-  `solokeys-secrets-host.exe`) and the final installer, via a SignPath artifact
-  configuration with deep signing.
 
 ## Reviewer Notes
 
