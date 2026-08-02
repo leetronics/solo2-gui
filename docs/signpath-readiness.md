@@ -45,8 +45,11 @@ using repository-stored certificate material.
   `20421d1a8a61e6e0043bd7f0e9c9f977803801f6` per the documented command; identical
   except for 5 bytes of the builder's home directory embedded in a cargo registry
   path string. Details recorded in `THIRD_PARTY_NOTICES.md`.
-- Confirm that all bundled PyInstaller runtime contents are covered by
-  open-source licenses or system-library exceptions.
+- ~~Confirm that all bundled PyInstaller runtime contents are covered by
+  open-source licenses or system-library exceptions.~~ Done (2026-08-02) —
+  license metadata of every package in the build environment reviewed; all
+  bundled components are OSI-approved open source (details and copyleft
+  handling recorded in `THIRD_PARTY_NOTICES.md`).
 - ~~Add a release/download page section explaining that Windows artifacts are
   signed through SignPath Foundation once this is active.~~ Done — the README
   now contains a "Code Signing Policy" section with the required wording,
@@ -58,9 +61,11 @@ using repository-stored certificate material.
 - The signing workflow must run in `solokeys/solo2-python-gui`: SignPath
   verifies the repository URL from the request form against the CI origin for
   every build.
-- Decide whether SignPath should sign only the final installer or also nested
-  executables through an artifact configuration. Signing both nested executables
-  and the final installer is preferable.
+- ~~Decide whether SignPath should sign only the final installer or also nested
+  executables through an artifact configuration.~~ Decided (2026-08-02): sign
+  everything — the nested executables (`SoloKeys GUI.exe`,
+  `solokeys-secrets-host.exe`) and the final installer, via a SignPath artifact
+  configuration with deep signing.
 
 ## Reviewer Notes
 

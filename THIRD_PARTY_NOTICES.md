@@ -5,23 +5,36 @@ SoloKeys GUI is distributed under `MIT OR Apache-2.0`.
 The packaged desktop artifacts may include the following open-source runtime
 components. This list tracks the direct runtime dependencies declared by this
 project; generated PyInstaller payloads may also include transitive dependencies
-such as `certifi`, `charset-normalizer`, `idna`, `urllib3`, `cffi`, and
-`pycparser`.
+such as `certifi` (MPL-2.0), `charset-normalizer` (MIT), `idna` (BSD-3-Clause),
+`urllib3` (MIT), `cffi` (MIT), and `pycparser` (BSD-3-Clause).
+
+License audit (2026-08-02): the license metadata of every package in the
+build environment was reviewed. All runtime components bundled into the
+PyInstaller payloads are covered by OSI-approved open-source licenses; no
+proprietary components are included. Copyleft components (PySide6/Qt under
+LGPL-3.0, pyscard and libusb under LGPL-2.1-or-later) are dynamically linked
+shared libraries that can be replaced by the user, satisfying the LGPL. The
+GPL-licensed `pyinstaller` and `pyinstaller-hooks-contrib` are build tools;
+only the PyInstaller bootloader ships in the artifacts, and it carries the
+GPL bootloader exception for exactly this purpose. `hidapi` is dual-licensed
+BSD-style/GPL-3.0 and is used under the BSD-style option.
 
 | Component | Purpose | License family |
 |-----------|---------|----------------|
+| CPython runtime | Embedded Python interpreter | PSF-2.0 |
 | `solo2` | Solo 2 hardware abstraction library | `MIT OR Apache-2.0` |
-| `PySide6` / Qt for Python | GUI toolkit | `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only` |
-| `fido2` | CTAP/FIDO2 protocol support | BSD-style |
+| `PySide6` / Qt for Python (ships Qt 6 libraries) | GUI toolkit | `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only` (used under LGPL-3.0) |
+| `fido2` | CTAP/FIDO2 protocol support | BSD-2-Clause (ships `public_suffix_list.dat`, MPL-2.0) |
 | `pyusb` | USB backend support | BSD-style |
+| `libusb` | USB access library (bundled on Windows/macOS, system library on Linux) | LGPL-2.1-or-later |
 | `requests` | HTTPS requests for update checks/downloads | Apache-2.0 |
-| `qtawesome` | Icon support | MIT |
-| `pyscard` | PC/SC smartcard support | LGPL-style |
-| `hidapi` / `cython-hidapi` | HID device enumeration/access | BSD-style |
+| `qtawesome` | Icon support | MIT (bundled icon fonts under OFL-1.1 / Apache-2.0 / MIT) |
+| `pyscard` | PC/SC smartcard support | LGPL-2.1-or-later |
+| `hidapi` / `cython-hidapi` | HID device enumeration/access | dual BSD-style / GPL-3.0 (used under the BSD-style option) |
 | `cryptography` | Cryptographic primitives | Apache-2.0 OR BSD-style |
 | `pywin32` | Windows native integration | PSF-style |
 | `PyInstaller` bootloader | Packaged executable launcher | GPL-2.0-or-later with bootloader exception |
-| Inno Setup | Windows installer builder | BSD-style |
+| Inno Setup | Windows installer builder | BSD-style (Inno Setup license) |
 
 ## Bundled Firmware/Device Images
 
@@ -62,10 +75,11 @@ Reproducibility verification (2026-07-31):
 
 Decision (2026-08-02): the binary remains inside signed desktop installers.
 It is open-source firmware with documented, verified provenance (see above),
-required for the FIDO2 attestation provisioning feature, and shipping it keeps
-that feature working offline. It is data to the desktop application — device
-firmware, never executed on the host — so it is not itself Authenticode-signed;
-its integrity is covered by the signed installer.
+required for provisioning FIDO2 self-attestation on hacker keys / developer
+builds, and shipping it keeps that feature working offline. It is data to the
+desktop application — device firmware, never executed on the host — so it is
+not itself Authenticode-signed; its integrity is covered by the signed
+installer.
 
 This documents the open-source provenance needed for a strict "all bundled
 components are open source or system libraries" review.
