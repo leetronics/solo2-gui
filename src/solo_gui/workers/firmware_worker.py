@@ -41,6 +41,7 @@ class FirmwareInfo:
     release_notes: str
     download_url: str = ""   # .bin URL (Hacker)
     sb2_url: str = ""        # .sb2 URL (Secure)
+    release_url: str = ""
 
 
 class FirmwareUpdateWorker(QObject):
@@ -703,6 +704,7 @@ class FirmwareRepo:
             version = tag_name.lstrip("v") if tag_name else "Unknown"
             published_at = data.get("published_at", "")[:10]
             body = data.get("body", "")
+            release_url = data.get("html_url", "")
 
             # Find firmware binary assets (.bin for Hacker, .sb2 for Secure)
             assets = data.get("assets", [])
@@ -739,6 +741,7 @@ class FirmwareRepo:
                 size=primary.get("size", 0),
                 checksum=checksum,
                 release_notes=body,
+                release_url=release_url,
                 download_url=bin_asset.get("browser_download_url", "") if bin_asset else "",
                 sb2_url=sb2_asset.get("browser_download_url", "") if sb2_asset else "",
             )

@@ -13,6 +13,13 @@ from solo_gui.models.device import SoloDevice, DeviceInfo, DeviceMode, format_fi
 from solo_gui.workers.firmware_worker import FirmwareUpdateWorker, FirmwareInfo
 
 
+SOLO2_RELEASES_URL = "https://github.com/solokeys/solo2/releases"
+
+
+def _is_v1_firmware(version: str) -> bool:
+    return version.strip().startswith("1:")
+
+
 class OverviewTab(QWidget):
     """Overview tab showing device status and firmware update."""
 
@@ -33,6 +40,7 @@ class OverviewTab(QWidget):
         self._isp_variant: Optional[str] = None
         self._firmware_busy: bool = False  # True while a flash/update is in flight
         self._touch_prompt: Optional[QMessageBox] = None
+        self._show_factory_reset_notice_after_flash: bool = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -255,20 +263,65 @@ class OverviewTab(QWidget):
         info = self._device.get_info()
         self._check_updates_requested.emit(info.firmware_version or "0")
 
+    def _current_firmware_version(self) -> str:
+        if not self._device:
+            return ""
+        try:
+            info = self._device.get_info()
+            return info.firmware_version or ""
+        except Exception:
+            return ""
+
+    def _has_v1_update_risk(self) -> bool:
+        return _is_v1_firmware(self._current_firmware_version())
+
+    def _v1_update_warning_text(self, release_url: str) -> str:
+        notes_url = release_url or SOLO2_RELEASES_URL
+        return (
+            "Important v1 -> v2 firmware warning:\n\n"
+            "Existing FIDO2/WebAuthn registrations made on v1 firmware may stop "
+            "working after this update. Make sure you have another way to sign in "
+            "to every account registered with this Solo 2 before continuing.\n\n"
+            "After the update completes, run Factory Reset from the Admin tab before "
+            "using FIDO2 again. The reset clears incompatible v1 FIDO2 state and "
+            "frees storage. You will need to set a new PIN and register this key "
+            "again with your accounts.\n\n"
+            f"Release notes: {notes_url}"
+        )
+
+    def _firmware_update_confirmation_text(self, firmware_info: FirmwareInfo) -> str:
+        text = (
+            f"Update firmware to version {firmware_info.version}?\n\n"
+            "After you click Yes, watch the Solo 2 and press its button when it "
+            "asks for touch confirmation to enter bootloader mode.\n\n"
+            "Do not disconnect the device during this process."
+        )
+        if self._has_v1_update_risk():
+            text += "\n\n" + self._v1_update_warning_text(firmware_info.release_url)
+        return text
+
+    def _append_v1_flash_warning(self, confirm_text: str) -> str:
+        if not self._has_v1_update_risk():
+            return confirm_text
+        return (
+            confirm_text
+            + "\n\n"
+            + self._v1_update_warning_text(SOLO2_RELEASES_URL)
+        )
+
     def _start_firmware_update(self) -> None:
         if not self._firmware_worker or not self._firmware_info:
             return
+        has_v1_risk = self._has_v1_update_risk()
         reply = QMessageBox.warning(
             self,
             "Confirm Firmware Update",
-            f"Update firmware to version {self._firmware_info.version}?\n\n"
-            "After you click Yes, watch the Solo 2 and press its button when it "
-            "asks for touch confirmation to enter bootloader mode.\n\n"
-            "Do not disconnect the device during this process.",
+            self._firmware_update_confirmation_text(self._firmware_info),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
+            self._show_factory_reset_notice_after_flash = has_v1_risk
             self._set_busy(True, "Starting firmware update...")
             self._show_touch_prompt()
             self._check_updates_button.setEnabled(False)
@@ -311,6 +364,8 @@ class OverviewTab(QWidget):
                 "Do not disconnect during the process."
             )
 
+        confirm_text = self._append_v1_flash_warning(confirm_text)
+        has_v1_risk = self._has_v1_update_risk()
         reply = QMessageBox.warning(
             self,
             "Flash Firmware",
@@ -319,6 +374,7 @@ class OverviewTab(QWidget):
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
+            self._show_factory_reset_notice_after_flash = has_v1_risk
             self._start_flash(path, with_attestation)
 
     def _start_flash(self, path: str, with_attestation: bool) -> None:
@@ -336,6 +392,7 @@ class OverviewTab(QWidget):
         Danger Zone (already confirmed there, so no extra dialog here)."""
         if not self._device or not self._firmware_worker or self._firmware_busy:
             return
+        self._show_factory_reset_notice_after_flash = self._has_v1_update_risk()
         self._start_flash(path, with_attestation=False)
 
     def _replace_last_log_line(self, message: str) -> None:
@@ -389,15 +446,26 @@ class OverviewTab(QWidget):
         self._firmware_busy = False
         self._set_busy(False)
         self._log_area.appendPlainText(message)
+        show_factory_reset_notice = success and self._show_factory_reset_notice_after_flash
+        self._show_factory_reset_notice_after_flash = False
         self._post_flash_setup()
         if not success:
             QMessageBox.critical(self, "Update Failed", message)
+        elif show_factory_reset_notice:
+            QMessageBox.information(
+                self,
+                "Factory Reset Required",
+                "Firmware update completed.\n\n"
+                "Run Factory Reset from the Admin tab before using FIDO2 again. "
+                "Then set a new PIN and register this Solo 2 with your accounts again.",
+            )
 
     def _on_firmware_error(self, error: str) -> None:
         self._hide_touch_prompt()
         self._firmware_busy = False
         self._set_busy(False)
         self._log_area.appendPlainText(f"Error: {error}")
+        self._show_factory_reset_notice_after_flash = False
         self._post_flash_setup()
         QMessageBox.critical(self, "Firmware Error", error)
 
