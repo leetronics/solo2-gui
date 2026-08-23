@@ -268,3 +268,34 @@ jobs:
             dist/solokeys-gui_*.deb
             dist/solokeys-gui-*.rpm
             dist/SoloKeys-GUI-*.AppImage
+
+  build-flatpak:
+    name: Flatpak
+    runs-on: ubuntu-22.04
+    needs: [prepare, create-release]
+    env:
+      SOLOKEYS_GUI_VERSION: ${{ needs.prepare.outputs.app_version }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder python3-venv
+
+      - name: Build Flatpak bundle
+        run: bash packaging/flatpak/build_flatpak.sh
+
+      - name: Upload Flatpak release artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          overwrite_files: true
+          files: dist/SoloKeys-GUI-*.flatpak

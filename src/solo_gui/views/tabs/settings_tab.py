@@ -219,6 +219,7 @@ class SettingsTab(QWidget):
         any_repair = False
         any_user_scope = False
         all_system = True
+        unsupported = False
 
         for browser_key in (native_host_installer.CHROMIUM, native_host_installer.FIREFOX):
             status = statuses[browser_key]
@@ -229,6 +230,10 @@ class SettingsTab(QWidget):
             if repair:
                 lines.append(f"⚠ {label}: registration needs repair")
                 any_repair = True
+            elif scope == "unsupported":
+                lines.append(f"✗ {label}: not supported in this build")
+                unsupported = True
+                all_system = False
             elif scope == "system":
                 lines.append(f"✓ {label}: registered system-wide")
             elif scope == "user":
@@ -247,7 +252,11 @@ class SettingsTab(QWidget):
 
         self._host_status_label.setText("\n".join(lines))
 
-        if any_repair:
+        if unsupported:
+            self._host_status_label.setStyleSheet("color: #c77d00; font-weight: bold;")
+            self._register_btn.setText("Not supported in Flatpak")
+            self._register_btn.setEnabled(False)
+        elif any_repair:
             self._host_status_label.setStyleSheet("color: #c77d00; font-weight: bold;")
             self._register_btn.setText("Repair browser host registration")
             self._register_btn.setEnabled(True)

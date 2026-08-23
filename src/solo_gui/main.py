@@ -182,7 +182,8 @@ def main() -> None:
 
     # Silently ensure browser host registration on startup.
     # This is a no-op when Linux packages already installed valid system manifests.
-    QTimer.singleShot(500, _auto_register_host)
+    if not os.environ.get("FLATPAK_ID"):
+        QTimer.singleShot(500, _auto_register_host)
 
     import logging
 

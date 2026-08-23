@@ -163,6 +163,9 @@ The Debian package is written to `dist/` as `solokeys-gui_<version>_<arch>.deb`.
 
 The AppImage registers the Chrome/Chromium and Firefox native messaging host per user. Browser manifests point to a stable wrapper under `~/.local/share/solokeys-gui/`, and that wrapper launches the AppImage in native-host mode. If you move the AppImage, start it once and the app will repair the browser registration. The AppImage does not install udev rules; install the rules manually or use the native `.deb`/`.rpm` package for system integration.
 
+Experimental Flatpak packaging lives in `packaging/flatpak/`. It is intended
+for local validation before any Flathub submission.
+
 ### macOS
 
 Install `libusb` via Homebrew before running from source:

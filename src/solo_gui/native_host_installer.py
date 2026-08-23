@@ -36,11 +36,19 @@ BROWSER_LABELS = {
     FIREFOX: "Firefox",
 }
 BROWSER_KEYS = (CHROMIUM, FIREFOX)
+FLATPAK_UNSUPPORTED_MESSAGE = (
+    "Browser native messaging is not supported by the Flatpak build yet. "
+    "Use the .deb/.rpm package or AppImage if you need SoloKeys Vault browser integration."
+)
 
 # Fixed browser extension IDs. Must stay in sync with the extension manifests.
 CHROMIUM_EXTENSION_ID = "pfcbbbbhhjkecdmjadjgphfpphmgjkpj"
 CHROMIUM_EXTENSION_ORIGIN = f"chrome-extension://{CHROMIUM_EXTENSION_ID}/"
 FIREFOX_EXTENSION_ID = "solokeys-vault@solokeys.dev"
+
+
+def _is_flatpak() -> bool:
+    return bool(os.environ.get("FLATPAK_ID"))
 
 
 def _manifest_filename(browser_key: str, host_name: str) -> str:
@@ -301,6 +309,9 @@ def find_native_host_exe(create_wrapper: bool = True) -> Optional[str]:
     """
     Return the absolute path to the native host executable, or None if not found.
     """
+    if _is_flatpak():
+        return None
+
     appimage = _get_appimage_path()
     if appimage is not None:
         wrapper = _get_wrapper_path()
@@ -375,6 +386,16 @@ def _create_wrapper() -> str:
 
 
 def registration_statuses() -> dict[str, dict]:
+    if _is_flatpak():
+        return {
+            browser_key: {
+                "label": BROWSER_LABELS[browser_key],
+                "scope": "unsupported",
+                "needs_repair": False,
+            }
+            for browser_key in BROWSER_KEYS
+        }
+
     statuses: dict[str, dict] = {}
     for browser_key in BROWSER_KEYS:
         statuses[browser_key] = {
@@ -394,6 +415,8 @@ def is_registered() -> bool:
 
 
 def registration_scope() -> str:
+    if _is_flatpak():
+        return "unsupported"
     scopes = {status["scope"] for status in registration_statuses().values()}
     if scopes == {"system"}:
         return "system"
@@ -579,6 +602,9 @@ def _manifest_is_valid(path: Path, expected_host_name: str, browser_key: str) ->
 
 
 def install() -> tuple[bool, str]:
+    if _is_flatpak():
+        return False, FLATPAK_UNSUPPORTED_MESSAGE
+
     host_exe = find_native_host_exe()
     if not host_exe:
         return False, "Could not locate the native host executable."

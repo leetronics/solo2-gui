@@ -46,6 +46,10 @@ Thumbs.db
 *.zip
 dist/
 build/
+packaging/flatpak/.flatpak-builder/
+packaging/flatpak/build-dir/
+packaging/flatpak/repo/
+packaging/flatpak/python3-requirements.json
 
 # PyInstaller
 *.spec.bak

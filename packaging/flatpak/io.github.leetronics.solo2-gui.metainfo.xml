@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.leetronics.solo2-gui</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>SoloKeys GUI</name>
+  <summary>Manage Solo 2 security keys</summary>
+
+  <description>
+    <p>
+      SoloKeys GUI is a desktop application for managing Solo 2 security keys.
+      It can inspect connected devices, manage FIDO2 resident credentials and
+      PIN state, install firmware updates, and expose PIV, OpenPGP, Secrets,
+      and administrative workflows when the device and host support them.
+    </p>
+    <p>
+      The Flatpak build requires access to Solo 2 USB/HID devices for FIDO2,
+      discovery, and firmware flashing. PIV and OpenPGP features require the
+      host PC/SC service to be available.
+    </p>
+    <p>
+      Browser native messaging integration is not available in the Flatpak
+      build yet. Use the native Linux packages or AppImage if you need
+      SoloKeys Vault browser integration.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.leetronics.solo2-gui.desktop</launchable>
+  <categories>
+    <category>Utility</category>
+    <category>Security</category>
+  </categories>
+
+  <url type="homepage">https://github.com/leetronics/solo2-gui</url>
+  <url type="bugtracker">https://github.com/leetronics/solo2-gui/issues</url>
+  <url type="vcs-browser">https://github.com/leetronics/solo2-gui</url>
+
+  <provides>
+    <binary>solokeys-gui</binary>
+  </provides>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-08-23">
+      <description>
+        <p>Initial Flatpak packaging metadata.</p>
+      </description>
+    </release>
+  </releases>
+</component>
